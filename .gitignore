@@ -1,6 +1,7 @@
-# ── Not published ───────────────────────────────────────────────────
-# Design contracts, working notes and the agent workflow that produced
-# this package.  Useful locally, not part of the public record.
+# ── Project cognition, not software artifacts ──────────────────────
+# This whole section is for maintainers taking over the project, not package
+# users.  These records are written in Chinese and include retrospectives of
+# mistaken judgments; public-facing material in this repository is English.
 .specs/
 .scratch/
 .claude/
@@ -10,6 +11,11 @@ UPGRADE.md
 CONTEXT.md
 docs/spec-agents/
 skills/
+KERNEL.md
+EVIDENCE.md
+STATUS.md
+docs/adr/
+docs/lessons/
 
 # ── Local prototypes ────────────────────────────────────────────────
 prototype/
