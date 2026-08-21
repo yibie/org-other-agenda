@@ -1,0 +1,27 @@
+# ── Not published ───────────────────────────────────────────────────
+# Design contracts, working notes and the agent workflow that produced
+# this package.  Useful locally, not part of the public record.
+.specs/
+.scratch/
+.claude/
+AGENTS.md
+START.md
+UPGRADE.md
+CONTEXT.md
+docs/spec-agents/
+skills/
+
+# ── Local prototypes ────────────────────────────────────────────────
+prototype/
+
+# ── Build artefacts ─────────────────────────────────────────────────
+*.elc
+.DS_Store
+
+# ── Emacs working files ─────────────────────────────────────────────
+# A lock file is a symlink whose target carries the user and host names.
+# The leading '#' of an autosave name must be escaped or the line reads as
+# a comment.
+.\#*
+\#*\#
+*~

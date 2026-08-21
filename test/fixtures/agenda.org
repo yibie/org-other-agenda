@@ -1,0 +1,201 @@
+#+TITLE: org-other-agenda synthetic fixture
+#+CATEGORY: fixture
+#+TODO: TODO STARTED WAITING | DONE CANCELLED
+#+STARTUP: overview
+
+# Anchor date: 2026-08-20 Thu.  That week is 2026-08-17 Mon .. 2026-08-23 Sun.
+# Tests must pass START-DAY *and* pin `org-today'; see README.md in this
+# directory.  Pinning only the span start is not enough.
+
+* Project Alpha
+  :PROPERTIES:
+  :CATEGORY: alpha
+  :END:
+
+** TODO [#A] Ship the release notes                                :work:urgent:
+   DEADLINE: <2026-08-20 Thu>
+   :PROPERTIES:
+   :EFFORT:   1:30
+   :END:
+   Covers deadline handling, an [#A] cookie, an effort property, two tags.
+
+** TODO [#C] Tidy the backlog board                                       :work:
+   SCHEDULED: <2026-08-20 Thu 14:00-15:30>
+   Covers a scheduled entry with a time range, time-of-day, grid alignment.
+
+** DONE Close the quarterly survey                                        :work:
+   CLOSED: [2026-08-19 Wed 18:22] SCHEDULED: <2026-08-19 Wed>
+   Covers DONE styling, a CLOSED stamp, the show-log path.
+
+** WAITING Reply from the vendor                                   :work:extern:
+   SCHEDULED: <2026-08-18 Tue>
+   Covers a non-builtin TODO keyword in the merged view.
+
+* Project Beta — ordered steps (blocked semantics)
+  :PROPERTIES:
+  :CATEGORY: beta
+  :ORDERED:  t
+  :END:
+
+  With ORDERED and `org-enforce-todo-dependencies' the second and third
+  children are blocked.  This is one of Org's built-in blockers, so no
+  third-party dependency is needed to exercise `org-entry-blocked-p'.
+
+** TODO Draft the migration plan                                         :build:
+   SCHEDULED: <2026-08-20 Thu>
+
+** TODO Run the migration dry run                                        :build:
+   SCHEDULED: <2026-08-20 Thu>
+   Covers `org-todo-blocked', which is only written when both
+   `org-agenda-dim-blocked-tasks' and `org-blocker-hook' are non-nil.
+
+** TODO Cut over production                                              :build:
+   SCHEDULED: <2026-08-21 Fri>
+
+* Project Gamma — checkbox blocking
+
+** TODO Prepare the launch checklist                                     :check:
+   SCHEDULED: <2026-08-20 Thu>
+   Covers `org-blocked-by-checkboxes', a different blocker path than ORDERED.
+   - [X] Book the room
+   - [ ] Send the invitations
+
+* Habits
+
+** TODO Daily review                                                     :habit:
+   SCHEDULED: <2026-08-20 Thu .+1d/2d>
+   :PROPERTIES:
+   :STYLE:    habit
+   :LAST_REPEAT: [2026-08-19 Wed 22:10]
+   :END:
+   :LOGBOOK:
+   - State "DONE"       from "TODO"       [2026-08-19 Wed 22:10]
+   - State "DONE"       from "TODO"       [2026-08-18 Tue 21:40]
+   - State "DONE"       from "TODO"       [2026-08-16 Sun 20:05]
+   - State "DONE"       from "TODO"       [2026-08-15 Sat 21:15]
+   :END:
+   Covers `org-habit-parse-todo' and `org-habit-build-graph' as a data
+   source, independent of `org-habit-insert-consistency-graphs'.
+   Requires (require 'org-habit) and a non-nil `org-habit-show-habits'.
+
+** TODO Empty the inbox                                                  :habit:
+   SCHEDULED: <2026-08-17 Mon .+1w/2w>
+   :PROPERTIES:
+   :STYLE:    habit
+   :END:
+   :LOGBOOK:
+   - State "DONE"       from "TODO"       [2026-08-10 Mon 09:30]
+   :END:
+
+* Clocking
+
+** STARTED Rewrite the parser                                             :work:
+   SCHEDULED: <2026-08-20 Thu>
+   :LOGBOOK:
+   CLOCK: [2026-08-20 Thu 09:15]
+   :END:
+   An open CLOCK line alone does not set `org-clock-hd-marker'.  A test must
+   clock in on this entry, or call `org-resolve-clocks', before asserting the
+   predicate that compares the row marker with `org-clock-hd-marker'.
+
+** TODO Profile the indexer                                               :work:
+   SCHEDULED: <2026-08-19 Wed>
+   :LOGBOOK:
+   CLOCK: [2026-08-19 Wed 10:00]--[2026-08-19 Wed 11:45] =>  1:45
+   CLOCK: [2026-08-18 Tue 14:00]--[2026-08-18 Tue 15:00] =>  1:00
+   :END:
+   Covers CLOCKSUM and column summaries, which must be computed at the source.
+
+* Spread across the week
+
+** TODO Update the changelog                                              :misc:
+   SCHEDULED: <2026-08-17 Mon>
+
+** TODO Review the design doc                                             :misc:
+   SCHEDULED: <2026-08-21 Fri>
+
+** TODO Water the plants                                                  :misc:
+   SCHEDULED: <2026-08-22 Sat>
+
+** TODO Renew the domain                                                  :misc:
+   SCHEDULED: <2026-08-25 Tue>
+   Falls outside the week view on purpose.
+
+** TODO File the tax return                                               :misc:
+   DEADLINE: <2026-09-02 Wed>
+   Covers the deadline warning window, `org-deadline-warning-days'.
+
+* Undated (the alltodo block)
+
+** TODO Read the RFC                                                     :inbox:
+   Must not appear in the agenda block, must appear in the backlog.
+   This is the sample that distinguishes the two blocks in a merged view.
+
+** TODO [#B] Reply to the conference                                     :inbox:
+
+** STARTED Sketch the onboarding flow                                    :inbox:
+
+* Search samples
+
+** TODO Investigate the zorblatt regression                             :search:
+   `org-search-view' writes a fixed 'priority 1000 on every hit, so the real
+   priority of an entry cannot be read back from that property in a search
+   block.
+
+** TODO Document the zorblatt workaround                                :search:
+   SCHEDULED: <2026-08-20 Thu>
+
+* Time blocks
+
+** TODO Standup                                                           :work:
+   SCHEDULED: <2026-08-20 Thu 09:00-09:30>
+
+** TODO Design review                                                     :work:
+   SCHEDULED: <2026-08-20 Thu 10:00-11:30>
+
+** TODO Lunch                                                             :life:
+   SCHEDULED: <2026-08-20 Thu 12:00-13:00>
+
+** TODO Write the weekly report                                           :work:
+   SCHEDULED: <2026-08-20 Thu 16:30-17:30>
+
+** TODO Gym                                                               :life:
+   SCHEDULED: <2026-08-21 Fri 07:00-08:00>
+
+** TODO Customer call                                                     :work:
+   SCHEDULED: <2026-08-21 Fri 15:00-16:00>
+
+** TODO Monday standup                                                    :work:
+   SCHEDULED: <2026-08-17 Mon 09:30-10:00>
+
+* Multi-day spans (week view bars)
+
+** TODO Write the quarterly report                                    :work:big:
+   <2026-08-18 Tue>--<2026-08-21 Fri>
+   Four days; drawn as a bar spanning Tue..Fri.
+
+** TODO Trip to Shanghai                                           :work:travel:
+   <2026-08-19 Wed>--<2026-08-20 Thu>
+
+** TODO Distributed systems course                                  :learn:big:
+   <2026-08-17 Mon>--<2026-08-23 Sun>
+   Spans the whole week; exercises clipping at both edges.
+
+** TODO Release sprint                                                    :work:
+   <2026-08-21 Fri>--<2026-08-22 Sat>
+
+* Overlap samples (the hard case for a time block view)
+
+** TODO All-day workshop                                              :work:big:
+   SCHEDULED: <2026-08-20 Thu 09:00-12:00>
+   Overlaps standup, design review and the sync, producing a four-way stack.
+
+** TODO Quick sync                                                        :work:
+   SCHEDULED: <2026-08-20 Thu 10:00-10:30>
+
+** TODO 1:1 with the designer                                             :work:
+   SCHEDULED: <2026-08-20 Thu 10:15-11:00>
+
+** TODO Clear the inbox                                                   :work:
+   SCHEDULED: <2026-08-20 Thu 16:45-17:15>
+   Partially overlaps the weekly report.
