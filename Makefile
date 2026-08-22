@@ -4,16 +4,23 @@
 # newer Org checkout, pass its lisp directory explicitly, for example:
 #
 #     make ORG=/path/to/org/lisp check
+#
+# Local Embark and compat paths can be kept in the ignored local.mk, or
+# overridden on the command line.
+
+-include local.mk
 
 EMACS ?= emacs
 TEXTUI ?= ../textui
+EMBARK ?= ../embark
+COMPAT ?= ../compat
 ORG ?=
 
 ELISP_SOURCES := org-other-agenda-day.el org-other-agenda.el
 ELISP_BYTECODES := $(ELISP_SOURCES:.el=.elc)
 TEST_FILE := test/org-other-agenda-test.el
 
-EMACS_LOAD_PATH := -L "$(TEXTUI)" -L .
+EMACS_LOAD_PATH := -L "$(TEXTUI)" -L "$(EMBARK)" -L "$(COMPAT)" -L .
 ifneq ($(strip $(ORG)),)
 EMACS_LOAD_PATH += -L "$(ORG)"
 endif

@@ -134,6 +134,16 @@ then pads the cell to its declared `:width'."
   (cond ((eq kind 'life) 'ooa-blk-life) ((eq kind 'habit) 'ooa-blk-habit)
         (t 'ooa-blk-work)))
 
+(defun ooa-day--object-value (value hd)
+  "Add the rendered Org-heading object for marker `HD' to `VALUE'."
+  (let ((value (copy-sequence (or value ""))))
+    (when (markerp hd)
+      (add-text-properties
+       0 (length value)
+       (list 'org-other-agenda-object (cons 'org-heading hd))
+       value))
+    value))
+
 
 ;; -- Calendar ----------------------------------------------------------
 (defun ooa-day--month-grid (sel-abs today-abs busy dead)
@@ -242,10 +252,12 @@ Each block is a property list containing `:title', `:start', `:end',
                              ((and (>= lw 22) (= mins (+ (plist-get b :start) slot)))
                               (truncate-string-to-width (plist-get b :title) (- lw 3) 0 ?\s))
                              (t ""))))
-                      (concat (ooa-day--stripe kind)
-                              (propertize
-                               (concat " " (truncate-string-to-width body (- lw 2) 0 ?\s))
-                               'face (ooa-day--blkface kind))))))))
+                      (ooa-day--object-value
+                       (concat (ooa-day--stripe kind)
+                               (propertize
+                                (concat " " (truncate-string-to-width body (- lw 2) 0 ?\s))
+                                'face (ooa-day--blkface kind)))
+                       (plist-get b :hd)))))))
              (line (concat "  " label (mapconcat #'identity cells ""))))
         ;; Extend the hairline across the full grid width; otherwise the grid
         ;; pattern stops halfway after the block-width cap.
@@ -322,6 +334,7 @@ infer the absolute start and end dates."
                                                (plist-get e :todo))
                           :start (- day (1- n)) :end (+ (- day (1- n)) (1- m))
                           :total m
+                          :hd hd
                           :kind (cond ((member "travel" tags) 'travel)
                                       ((member "learn" tags) 'learn)
                                       (t 'work)))
@@ -367,6 +380,7 @@ infer the absolute start and end dates."
             (setq txt (truncate-string-to-width txt w 0 ?\s))
             (add-face-text-property 0 (length txt)
                                     (ooa-day--barface (plist-get sp :kind)) nil txt)
+            (setq txt (ooa-day--object-value txt (plist-get sp :hd)))
             (setq line (concat (substring line 0 x) txt
                                (substring line (min (length line) (+ x w)))))))
         (push (list :type 'ooa-text :value line) rows)))

@@ -141,6 +141,32 @@ user's global block selection."
   "Return the display title for ENTRY."
   (org-other-agenda--clean-title entry))
 
+(defun org-other-agenda-test--entry-by-title (entries title)
+  "Return the first entry in `ENTRIES' whose title is `TITLE'."
+  (cl-find-if (lambda (entry)
+                (equal (org-other-agenda-test--title entry) title))
+              entries))
+
+(defun org-other-agenda-test--assert-rendered-target
+    (view tab needle title)
+  "Assert that `NEEDLE' in `TAB' resolves to the entry titled `TITLE'."
+  (org-other-agenda-test--select-tab view tab)
+  (with-current-buffer view
+    (goto-char (point-min))
+    (should (search-forward needle nil t))
+    (goto-char (- (point) (length needle)))
+    (let* ((entry (org-other-agenda-test--entry-by-title
+                   (plist-get textui-state :entries) title))
+           (marker (plist-get entry :hd))
+           (object (get-text-property (point) 'org-other-agenda-object))
+           (target (org-other-agenda-embark-target))
+           (target-title (nth 1 target)))
+      (should entry)
+      (should (equal object (cons 'org-heading marker)))
+      (should (equal (car target) 'org-heading))
+      (should (equal (get-text-property 0 'org-marker target-title)
+                     marker)))))
+
 (defun org-other-agenda-test--titles (entries)
   "Return cleaned titles for ENTRIES."
   (mapcar #'org-other-agenda-test--title entries))
@@ -235,6 +261,100 @@ user's global block selection."
           (forward-line 1)))
       (should (memq 'agenda types))
       (should (memq 'todo types)))))
+
+(ert-deftest org-other-agenda-test-embark-finder-targets-rendered-entry ()
+  "The Embark finder returns an Org-heading target only for entry rows."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view)))
+      (should (memq #'org-other-agenda-embark-target embark-target-finders))
+      (org-other-agenda-test--select-tab view 'agenda)
+      (with-current-buffer view
+        (goto-char (point-min))
+        (should (search-forward "Monday standup" nil t))
+        (beginning-of-line)
+        (let* ((entry (cl-find-if
+                       (lambda (candidate)
+                         (equal (org-other-agenda-test--title candidate)
+                                "Monday standup"))
+                       (plist-get textui-state :entries)))
+               (object (get-text-property (point) 'org-other-agenda-object))
+               (target (org-other-agenda-embark-target))
+               (title (nth 1 target)))
+          (should entry)
+          (should (equal (car object) 'org-heading))
+          (should (markerp (cdr object)))
+          (should (equal (cdr object) (plist-get entry :hd)))
+          (should (equal (car target) 'org-heading))
+          (should (equal (get-text-property 0 'org-marker title)
+                         (cdr object))))
+        (goto-char (point-min))
+        (should (search-forward "──" nil t))
+        (beginning-of-line)
+        (should-not (org-other-agenda-embark-target))))))
+
+(ert-deftest org-other-agenda-test-embark-action-refreshes-rendered-state ()
+  "An Org TODO action followed by the Embark hook refreshes the board row."
+  (let ((copy (make-temp-file "org-other-agenda-embark-" nil ".org")))
+    (copy-file org-other-agenda-test--fixture copy t)
+    (unwind-protect
+        (org-other-agenda-test--with-agenda-file copy
+          (let ((view (org-other-agenda-test--open-view)))
+            (org-other-agenda-test--select-tab view 'agenda)
+            (with-current-buffer view
+              (goto-char (point-min))
+              (should (search-forward "Monday standup" nil t))
+              (beginning-of-line)
+              (let* ((target (org-other-agenda-embark-target))
+                     (title (nth 1 target))
+                     (marker (get-text-property 0 'org-marker title))
+                     (target-info
+                      (list :type 'org-heading
+                            :target title
+                            :bounds (cddr target))))
+                (should (eq (keymap-lookup embark-org-heading-map "t")
+                            #'org-todo))
+                (org-with-point-at marker
+                  (org-todo 'done))
+                (embark--run-action-hooks embark-post-action-hooks
+                                          'org-todo target-info nil)
+                ;; `org-other-agenda--embark-refresh' requests the same state
+                ;; refresh used by the live view; force it synchronously for
+                ;; this batch assertion.
+                (textui-refresh view)
+                (goto-char (point-min))
+                (should (search-forward "Monday standup" nil t))
+                (let ((line (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position))))
+                  (should (string-match-p "DONE" line)))))))
+      (when (file-exists-p copy)
+        (delete-file copy)))))
+
+(ert-deftest org-other-agenda-test-embark-finder-targets-today-timed-row ()
+  "A Today time block resolves to its own Org heading marker."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--assert-rendered-target
+         view 'day "Design review" "Design review")))))
+
+(ert-deftest org-other-agenda-test-embark-finder-targets-week-bar ()
+  "A Week multi-day bar resolves to its Org heading marker."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--assert-rendered-target
+         view 'week "Write the" "Write the quarterly report")))))
+
+(ert-deftest org-other-agenda-test-embark-finder-targets-overflow-row ()
+  "A Today overflow row resolves to its own Org heading marker."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--assert-rendered-target
+         view 'day "1:1 with the designer" "1:1 with the designer")))))
 
 (ert-deftest org-other-agenda-test-restores-multi-day-span-dates ()
   "Block metadata reconstructs the quarterly report's four calendar days."

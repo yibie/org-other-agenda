@@ -4,7 +4,7 @@
 
 ;; Author: chenyibin
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (textui "0.5.1"))
+;; Package-Requires: ((emacs "29.1") (textui "0.5.1") (embark "1.2"))
 ;; Keywords: calendar, outlines, convenience
 ;; URL: https://github.com/yibie/org-other-agenda
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -30,6 +30,8 @@
 (require 'org-agenda)
 (require 'org-habit)
 (require 'textui)
+(require 'embark)
+(require 'embark-org)
 (require 'org-other-agenda-day)
 
 (defgroup org-other-agenda nil
@@ -40,6 +42,8 @@
 (defconst org-other-agenda--shadow " *org-other-agenda-shadow*")
 (defconst org-other-agenda--query-shadow " *org-other-agenda-query-shadow*")
 (defvar org-other-agenda-series)
+(defvar-local org-other-agenda--view nil
+  "Non-nil in a TextUI buffer rendered by `org-other-agenda'.")
 
 ;;; ---------------------------------------------------------------- Semantic extraction
 
@@ -163,6 +167,13 @@ When `BUFFER' is nil, use the ordinary base shadow buffer."
 
 ;;; ---------------------------------------------------------------- Clickable row widgets
 
+(defalias 'org-other-agenda--object-value #'ooa-day--object-value
+  "Add the rendered Org-heading object for marker `HD' to `VALUE'.
+
+The implementation lives in `org-other-agenda-day', which this file requires,
+so both renderers share one definition of the `org-other-agenda-object'
+property.")
+
 (define-widget 'org-other-agenda-row 'push-button
   "A clickable agenda entry row.
 
@@ -205,7 +216,9 @@ agenda, tags, and search.  TextUI requires each `:focus-id' to be unique
 within a frame, so the focus ID must include the block scope.  `ORDINAL'
 disambiguates repeated rows from the same block."
   (list :type 'org-other-agenda-row
-        :value (org-other-agenda--row e title-width tag-width todo-width)
+        :value (org-other-agenda--object-value
+                (org-other-agenda--row e title-width tag-width todo-width)
+                (plist-get e :hd))
         :cool-hd (plist-get e :hd)
         :layout (list :focus-id (list (or scope (plist-get e :type))
                                       (plist-get e :hd)
@@ -355,13 +368,15 @@ their cell counts.  Keep this implementation for regression comparisons."
             (truncate-string-to-width title title-width 0 ?\s)
             (org-other-agenda--tags-cell e tag-width))))
 
-(defun org-other-agenda--cell (value width &optional face)
+(defun org-other-agenda--cell (value width &optional face hd)
   "Build a fixed-width cell from `VALUE'.
 
-`WIDTH' sets the cell width, and optional `FACE' supplies its face."
-  (list :type 'ooa-text
-        :value (if face (propertize value 'face face) value)
-        :layout (list :width width)))
+`WIDTH' sets the cell width, optional `FACE' supplies its face, and `HD'
+adds the rendered Org-heading object for the row."
+  (let ((value (if face (propertize value 'face face) value)))
+    (list :type 'ooa-text
+          :value (if hd (org-other-agenda--object-value value hd) value)
+          :layout (list :width width))))
 
 (defun org-other-agenda--flex-row (e scope todo-width &optional ordinal)
   "Render `E' as a flex row with a clickable title cell.
@@ -376,21 +391,73 @@ focusable even when they share a heading marker and date."
     (list :type :flex :direction :row :gap 1
           :children
           (list
-           (org-other-agenda--cell (org-other-agenda--prio-cell e) 3)
+           (org-other-agenda--cell (org-other-agenda--prio-cell e) 3
+                                   nil (plist-get e :hd))
            (org-other-agenda--cell (org-other-agenda--state-cell e todo-width)
-                                   todo-width)
-           (org-other-agenda--cell (org-other-agenda--condition-cell e) 1)
-           (org-other-agenda--cell (org-other-agenda--time-cell e) 5)
+                                   todo-width nil (plist-get e :hd))
+           (org-other-agenda--cell (org-other-agenda--condition-cell e) 1
+                                   nil (plist-get e :hd))
+           (org-other-agenda--cell (org-other-agenda--time-cell e) 5
+                                   nil (plist-get e :hd))
            (list :type 'org-other-agenda-row
-                 :value (if (plist-get e :blocked)
-                            (propertize title 'face 'org-other-agenda-blocked)
-                          title)
+                 :value (org-other-agenda--object-value
+                         (if (plist-get e :blocked)
+                             (propertize title 'face 'org-other-agenda-blocked)
+                           title)
+                         (plist-get e :hd))
                  :cool-hd (plist-get e :hd)
                  :layout (list :grow 1
                                :focus-id (list scope (plist-get e :hd)
                                                (plist-get e :day)
                                                (or ordinal 0))))
-           (org-other-agenda--cell tagstr 18 'org-other-agenda-tag)))))
+           (org-other-agenda--cell tagstr 18 'org-other-agenda-tag
+                                   (plist-get e :hd))))))
+
+(defun org-other-agenda--embark-object-at-point ()
+  "Return the rendered Org-heading object at point or on the current line."
+  (or (get-text-property (point) 'org-other-agenda-object)
+      (and (> (point) (point-min))
+           (get-text-property (1- (point)) 'org-other-agenda-object))
+      (save-excursion
+        (goto-char (line-beginning-position))
+        (let ((end (line-end-position)))
+          (catch 'object
+            (while (< (point) end)
+              (when-let* ((object (get-text-property
+                                   (point) 'org-other-agenda-object)))
+                (throw 'object object))
+              (forward-char 1))
+            nil)))))
+
+(defun org-other-agenda--embark-title (hd)
+  "Return the cleaned rendered title for Org heading marker `HD'."
+  (let* ((state (and (boundp 'textui-state) textui-state))
+         (entry
+          (cl-loop for key in '(:entries :base-entries :query-entries)
+                   thereis (cl-find hd (plist-get state key)
+                                    :key (lambda (candidate)
+                                           (plist-get candidate :hd))
+                                    :test #'equal))))
+    (or (and entry (org-other-agenda--clean-title entry))
+        (org-with-point-at hd (org-get-heading t t t t)))))
+
+(defun org-other-agenda-embark-target ()
+  "Return an Embark `org-heading' target for the entry at point.
+
+The target title carries the source marker as its `org-marker' text property,
+which is the location contract used by `embark-org-heading-map'."
+  (when (and org-other-agenda--view
+             (derived-mode-p 'textui-mode))
+    (let* ((object (org-other-agenda--embark-object-at-point))
+           (hd (and (consp object)
+                    (eq (car object) 'org-heading)
+                    (markerp (cdr object))
+                    (cdr object))))
+      (when (and hd (buffer-live-p (marker-buffer hd)))
+        (let ((title (org-other-agenda--embark-title hd)))
+          (when (stringp title)
+            `(org-heading ,(propertize title 'org-marker hd)
+                          ,(line-beginning-position) . ,(line-end-position))))))))
 
 (defconst org-other-agenda--slot 15
   "The number of minutes represented by one time-block row.")
@@ -678,20 +745,22 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
                                             :cool-hd (plist-get x :hd)
                                             :layout (list :focus-id
                                                           (list 'pin (plist-get x :hd)))
-                                            :value (concat
-                                                    "  "
-                                                    (propertize
-                                                     (aref org-other-agenda--circ (min 8 i))
-                                                     'face 'ooa-cal-today)
-                                                    " "
-                                                    (propertize
-                                                     (format "%02d:%02d "
-                                                             (/ (plist-get x :start) 60)
-                                                             (% (plist-get x :start) 60))
-                                                     'face 'ooa-blk-time)
-                                                    (plist-get x :title)
-                                                    (propertize "  click to take main lane"
-                                                                'face 'ooa-day-meta))))))))))
+                                            :value (org-other-agenda--object-value
+                                                    (concat
+                                                     "  "
+                                                     (propertize
+                                                      (aref org-other-agenda--circ (min 8 i))
+                                                      'face 'ooa-cal-today)
+                                                     " "
+                                                     (propertize
+                                                      (format "%02d:%02d "
+                                                              (/ (plist-get x :start) 60)
+                                                              (% (plist-get x :start) 60))
+                                                      'face 'ooa-blk-time)
+                                                     (plist-get x :title)
+                                                     (propertize "  click to take main lane"
+                                                                 'face 'ooa-day-meta))
+                                                    (plist-get x :hd))))))))))
        (list :type 'ooa-text :value " ")
        (list :type 'ooa-text
              :value (propertize
@@ -786,7 +855,8 @@ The page contains a day-list header, multi-day bars, and daily entries.
                                                   (add-face-text-property
                                                    0 (length v)
                                                    (org-other-agenda--tag-face e) t v)
-                                                  v)
+                                                  (org-other-agenda--object-value
+                                                   v (plist-get e :hd)))
                                          :cool-hd (plist-get e :hd)
                                          :layout (list :focus-id
                                                        (list 'wk (plist-get e :hd)
@@ -1170,6 +1240,7 @@ sets the shared state-column width."
   "Build the complete frame for `WIDTH'.
 
 Combine the tab bar, query bar, and selected page in a vertical layout."
+  (setq-local org-other-agenda--view t)
   (let* ((tab (or (plist-get textui-state :tab) 'agenda))
          (query-view (memq tab '(search tags)))
          (base (or (plist-get textui-state :base-entries)
@@ -1486,6 +1557,27 @@ implementation; all tabs now use `org-other-agenda--viewport-scroll'."
     (textui-set-state view :query-kind kind)
     (message "Refreshed")))
 
+(cl-defun org-other-agenda--embark-refresh
+    (&key type target &allow-other-keys)
+  "Refresh board views after Embark acts on `TARGET' of type `TYPE'."
+  (let ((marker (and (eq type 'org-heading)
+                     (stringp target)
+                     (get-text-property 0 'org-marker target))))
+    (when (and (markerp marker) (buffer-live-p (marker-buffer marker)))
+      (dolist (view (buffer-list))
+        (when (with-current-buffer view
+                (and org-other-agenda--view
+                     (derived-mode-p 'textui-mode)))
+          ;; Embark runs the Org action at the source marker.  Its post-action
+          ;; hook is the smallest bridge back to this projection: reuse the
+          ;; normal full refresh instead of advising Org or claiming an
+          ;; `org-agenda-mode' parent for the rendered buffer.  The `:always'
+          ;; hook refreshes every board after any action on any marked
+          ;; `org-heading', including non-mutating actions; that cost is
+          ;; accepted for step 1 and may be narrowed later.
+          (with-current-buffer view
+            (org-other-agenda-refresh)))))))
+
 (defun org-other-agenda--regenerate-view (view)
   "Regenerate only the active query and update TextUI `VIEW'."
   (with-current-buffer view
@@ -1565,6 +1657,10 @@ is overridden.  The blocks shown come from `org-other-agenda-series'."
                                            (current-local-map)))
       (add-hook 'post-command-hook #'org-other-agenda--follow-viewport nil t))
       buffer)))
+
+(cl-pushnew #'org-other-agenda-embark-target embark-target-finders)
+(cl-pushnew #'org-other-agenda--embark-refresh
+            (alist-get :always embark-post-action-hooks))
 
 (provide 'org-other-agenda)
 ;;; org-other-agenda.el ends here

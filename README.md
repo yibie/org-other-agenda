@@ -36,7 +36,9 @@ command forwarding all work against real Org data.
 
 ## Requirements
 
-Emacs 29.1 or newer, Org 9.6 or newer, and TextUI.
+Emacs 29.1 or newer, Org 9.6 or newer, TextUI, and Embark.  Embark is
+required because actions on board objects are discovered and invoked through
+`embark-act`.
 
 ## Install
 

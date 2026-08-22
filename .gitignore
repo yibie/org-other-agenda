@@ -22,6 +22,7 @@ prototype/
 
 # ── Build artefacts ─────────────────────────────────────────────────
 *.elc
+local.mk
 .DS_Store
 
 # ── Emacs working files ─────────────────────────────────────────────
