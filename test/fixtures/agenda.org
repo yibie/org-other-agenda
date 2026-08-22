@@ -108,7 +108,7 @@
 
 * Spread across the week
 
-** TODO Update the changelog                                              :misc:
+** DONE Update the changelog                                           :misc:
    SCHEDULED: <2026-08-17 Mon>
 
 ** TODO Review the design doc                                             :misc:

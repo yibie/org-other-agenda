@@ -171,7 +171,7 @@ The entire row responds to mouse clicks and RET."
   :button-suffix ""
   :format "%[%v%]"
   :value-create
-  (lambda (widget) (insert (widget-value widget)))
+  (lambda (widget) (insert (ooa-text--non-empty (widget-value widget))))
   :action
   (lambda (widget &optional event)
     (let ((hd (widget-get widget :cool-hd)))

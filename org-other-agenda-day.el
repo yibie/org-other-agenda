@@ -100,14 +100,22 @@ the width, so subsequent columns drift."
   "A dot indicating a deadline."
   :group 'org-other-agenda)
 
+(defun ooa-text--non-empty (value)
+  "Return `VALUE', or a single space when `VALUE' is nil or empty."
+  (if (or (null value) (string-empty-p value)) " " value))
+
 (define-widget 'ooa-text 'item
   "A line of plain text that preserves text properties.
 
 The `ooa-text' widget exists because TextUI's built-in `item' widget drops
 text properties, including `face', from `value' during rendering. Rows that
-need coloring must therefore use this widget type."
+need coloring must therefore use this widget type.
+
+TextUI rejects a native widget that renders zero characters, so an empty
+`value' (an entry without tags, for example) renders as one space; TextUI
+then pads the cell to its declared `:width'."
   :format "%v"
-  :value-create (lambda (w) (insert (widget-get w :value))))
+  :value-create (lambda (w) (insert (ooa-text--non-empty (widget-get w :value)))))
 
 (define-widget 'ooa-date-cell 'push-button
   "A single date cell in the calendar."

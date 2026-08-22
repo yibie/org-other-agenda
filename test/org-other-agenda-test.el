@@ -381,6 +381,37 @@ user's global block selection."
       (when (file-exists-p small)
         (delete-file small)))))
 
+(ert-deftest org-other-agenda-test-untagged-entry-renders ()
+  "An entry without tags renders instead of aborting the whole board.
+
+TextUI refuses a native widget that renders zero characters, and an empty
+tag column used to hit that check.  The bundled fixture tags every heading,
+so this regression needs its own file."
+  (let ((file (make-temp-file "org-other-agenda-untagged-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* Inbox\n"
+                    "** TODO An untagged task\n"
+                    "   SCHEDULED: <2026-08-20 Thu>\n"
+                    "** TODO Another untagged task\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              ;; Week truncates titles to its column width, so match a
+              ;; prefix that survives every layout.
+              (dolist (case '((agenda . "An untagged task")
+                              (day . "An untagged task")
+                              (week . "An un")
+                              (someday . "Another untagged task")))
+                (org-other-agenda-test--select-tab view (car case))
+                (should (with-current-buffer view
+                          (save-excursion
+                            (goto-char (point-min))
+                            (search-forward (cdr case) nil t))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
 (ert-deftest org-other-agenda-test-overlapping-time-blocks-have-stable-overflow ()
   "Four-way overlap keeps stable lanes and identifies the overflow item."
   (org-other-agenda-test--with-fixture
