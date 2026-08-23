@@ -44,6 +44,10 @@
 (defvar org-other-agenda-series)
 (defvar-local org-other-agenda--view nil
   "Non-nil in a TextUI buffer rendered by `org-other-agenda'.")
+(defvar-local org-other-agenda--movement-scrolled nil
+  "Non-nil when entry movement already scrolled the current viewport.")
+(defvar org-other-agenda-entry-map)
+(defvar org-other-agenda-entry-cell-map)
 
 ;;; ---------------------------------------------------------------- Semantic extraction
 
@@ -168,11 +172,20 @@ When `BUFFER' is nil, use the ordinary base shadow buffer."
 ;;; ---------------------------------------------------------------- Clickable row widgets
 
 (defalias 'org-other-agenda--object-value #'ooa-day--object-value
-  "Add the rendered Org-heading object for marker `HD' to `VALUE'.
+  "Add the rendered Org-heading object and optional keymap to `VALUE'.
 
 The implementation lives in `org-other-agenda-day', which this file requires,
-so both renderers share one definition of the `org-other-agenda-object'
-property.")
+so both renderers share one definition of the `org-other-agenda-object' and
+`keymap' properties.  A nil keymap uses the entry-cell map for plain text
+cells; button widgets pass the entry map explicitly to preserve widget RET.")
+
+(defun org-other-agenda--parent-value (value)
+  "Mark `VALUE' as a date or section header for parent movement."
+  (let ((value (copy-sequence (or value ""))))
+    (add-text-properties 0 (length value)
+                         '(org-other-agenda-parent t)
+                         value)
+    value))
 
 (define-widget 'org-other-agenda-row 'push-button
   "A clickable agenda entry row.
@@ -218,7 +231,8 @@ disambiguates repeated rows from the same block."
   (list :type 'org-other-agenda-row
         :value (org-other-agenda--object-value
                 (org-other-agenda--row e title-width tag-width todo-width)
-                (plist-get e :hd))
+                (plist-get e :hd)
+                org-other-agenda-entry-map)
         :cool-hd (plist-get e :hd)
         :layout (list :focus-id (list (or scope (plist-get e :type))
                                       (plist-get e :hd)
@@ -375,7 +389,10 @@ their cell counts.  Keep this implementation for regression comparisons."
 adds the rendered Org-heading object for the row."
   (let ((value (if face (propertize value 'face face) value)))
     (list :type 'ooa-text
-          :value (if hd (org-other-agenda--object-value value hd) value)
+          :value (if hd
+                     (org-other-agenda--object-value
+                      value hd org-other-agenda-entry-cell-map)
+                   value)
           :layout (list :width width))))
 
 (defun org-other-agenda--flex-row (e scope todo-width &optional ordinal)
@@ -404,7 +421,8 @@ focusable even when they share a heading marker and date."
                          (if (plist-get e :blocked)
                              (propertize title 'face 'org-other-agenda-blocked)
                            title)
-                         (plist-get e :hd))
+                         (plist-get e :hd)
+                         org-other-agenda-entry-map)
                  :cool-hd (plist-get e :hd)
                  :layout (list :grow 1
                                :focus-id (list scope (plist-get e :hd)
@@ -730,13 +748,14 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
                     :children
                     (append
                      (list (list :type 'ooa-text
-                                 :value (concat
-                                         (propertize (format "%s %d " (calendar-month-name (nth 0 g) t) (nth 1 g))
-                                                     'face 'ooa-day-title)
-                                         (propertize
-                                          (format " %d blocks · %d todos"
-                                                  (length blocks) (length untimed))
-                                          'face 'ooa-day-meta))))
+                                 :value (org-other-agenda--parent-value
+                                         (concat
+                                          (propertize (format "%s %d " (calendar-month-name (nth 0 g) t) (nth 1 g))
+                                                      'face 'ooa-day-title)
+                                          (propertize
+                                           (format " %d blocks · %d todos"
+                                                   (length blocks) (length untimed))
+                                           'face 'ooa-day-meta)))))
                      timeblock-elements
                      (when over
                        (cons (list :type 'ooa-text :value " ")
@@ -760,13 +779,15 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
                                                      (plist-get x :title)
                                                      (propertize "  click to take main lane"
                                                                  'face 'ooa-day-meta))
-                                                    (plist-get x :hd))))))))))
+                                                    (plist-get x :hd)
+                                                    org-other-agenda-entry-map)))))))))
        (list :type 'ooa-text :value " ")
        (list :type 'ooa-text
-             :value (propertize
-                     (format "  Other items today (%d)    ⊘ blocked · ▶ clocking · ◈ habit"
-                             (length untimed))
-                                'face 'ooa-day-meta))
+             :value (org-other-agenda--parent-value
+                     (propertize
+                      (format "  Other items today (%d)    ⊘ blocked · ▶ clocking · ◈ habit"
+                              (length untimed))
+                      'face 'ooa-day-meta)))
        (list :type :flex :direction :column :gap 0
              :children (or other-elements
                            (list (list :type 'ooa-text :value " "))))))))
@@ -815,10 +836,12 @@ The page contains a day-list header, multi-day bars, and daily entries.
                                        (if (= abs today) 'ooa-wk-today 'ooa-wk-head))))))
     (append
      (list (list :type 'ooa-text
-                 :value (concat (propertize "  This week " 'face 'ooa-day-title)
-                                (propertize (format "· %d multi-day" (length spans))
-                                            'face 'ooa-day-meta)))
-           (list :type 'ooa-text :value head)
+                 :value (org-other-agenda--parent-value
+                         (concat (propertize "  This week " 'face 'ooa-day-title)
+                                 (propertize (format "· %d multi-day" (length spans))
+                                             'face 'ooa-day-meta))))
+           (list :type 'ooa-text
+                 :value (org-other-agenda--parent-value head))
            (list :type 'ooa-text
                  :value (let ((r (concat (make-string labw ?\s)
                                          (make-string (* 7 colw) ?\s))))
@@ -856,7 +879,8 @@ The page contains a day-list header, multi-day bars, and daily entries.
                                                    0 (length v)
                                                    (org-other-agenda--tag-face e) t v)
                                                   (org-other-agenda--object-value
-                                                   v (plist-get e :hd)))
+                                                   v (plist-get e :hd)
+                                                   org-other-agenda-entry-map))
                                          :cool-hd (plist-get e :hd)
                                          :layout (list :focus-id
                                                        (list 'wk (plist-get e :hd)
@@ -880,25 +904,31 @@ The page contains a day-list header, multi-day bars, and daily entries.
   '((((background dark)) (:foreground "#D6A65C")) (t (:foreground "#9C6212")))
   "The query bar.")
 
-(defun org-other-agenda--query-bar (query kind n)
-  "Render the query bar for `QUERY' of `KIND' with `N' matches."
-  (list :type 'ooa-text
-        :value (concat
-                "  "
-                (if (and (stringp query)
-                         (string-match-p "\\S-" query))
-                    (concat (propertize (if (eq kind 'tags) "Tags " "Search ")
-                                        'face 'org-other-agenda-query)
-                            (propertize (if (eq kind 'tags)
-                                           (concat "#" query)
-                                         query)
-                                        'face '(:weight bold))
-                            (propertize (format "  → %d items" n)
-                                        'face 'org-other-agenda-dim)
-                            (propertize "     \\ clear"
-                                        'face 'org-other-agenda-dim))
-                  (propertize "/ search text or #tag"
-                              'face 'org-other-agenda-dim)))))
+(defun org-other-agenda--query-bar (query kind n &optional parent)
+  "Render the query bar for `QUERY' of `KIND' with `N' matches.
+
+When PARENT is non-nil, mark the bar as the section parent for query rows."
+  (let ((value
+         (concat
+          "  "
+          (if (and (stringp query)
+                   (string-match-p "\\S-" query))
+              (concat (propertize (if (eq kind 'tags) "Tags " "Search ")
+                                  'face 'org-other-agenda-query)
+                      (propertize (if (eq kind 'tags)
+                                     (concat "#" query)
+                                   query)
+                                  'face '(:weight bold))
+                      (propertize (format "  → %d items" n)
+                                  'face 'org-other-agenda-dim)
+                      (propertize "     \\ clear"
+                                  'face 'org-other-agenda-dim))
+            (propertize "/ search text or #tag"
+                        'face 'org-other-agenda-dim)))))
+    (list :type 'ooa-text
+          :value (if parent
+                     (org-other-agenda--parent-value value)
+                   value))))
 
 (defun org-other-agenda--query-page (entries query kind todo-width)
   "Render query `ENTRIES' for `QUERY' of `KIND'.
@@ -1170,9 +1200,10 @@ repeated rows in the frame focus map."
   (pcase (plist-get item :kind)
     ('header
      (list :type 'ooa-text
-           :value (propertize
-                   (format "── %s" (or (plist-get item :day) ""))
-                   'face 'org-other-agenda-day)))
+           :value (org-other-agenda--parent-value
+                   (propertize
+                    (format "── %s" (or (plist-get item :day) ""))
+                    'face 'org-other-agenda-day))))
     ('entry
      (org-other-agenda--flex-row
       (plist-get item :entry)
@@ -1190,6 +1221,24 @@ repeated rows in the frame focus map."
              :cool-key :overdue-open
              :layout (list :focus-id '(toggle overdue)))))))
 
+(defun org-other-agenda--agenda-viewport-parent (items offset)
+  "Return a parent header for ITEMS when the viewport starts at OFFSET.
+
+The normal date header is itself a viewport item.  Once the viewport has
+scrolled past it, keep a compact section header in the rendered page so `u'
+still has a parent to reach without making the off-screen rows part of the
+projection again."
+  (when (> offset 0)
+    (let* ((item (nth offset items))
+           (day (cl-loop for candidate in (nthcdr offset items)
+                         thereis (or (plist-get candidate :day)
+                                    (plist-get (plist-get candidate :entry)
+                                               :day)))))
+      (unless (eq (plist-get item :kind) 'header)
+        (list :type 'ooa-text
+              :value (org-other-agenda--parent-value
+                      (format "── %s" (or day "Agenda"))))))))
+
 (defun org-other-agenda--agenda-page-size ()
   "Return the current Agenda viewport page size."
   (org-other-agenda--viewport-page-size 'agenda))
@@ -1201,16 +1250,19 @@ Group entries by date and collapse overdue entries.  Only the current page of
 display descriptors is turned into TextUI elements, so long agendas do not
 materialize one widget per source row.  `TODO-WIDTH' sets the state column
 width."
-  (let ((items (org-other-agenda--agenda-items entries)))
+  (let* ((items (org-other-agenda--agenda-items entries))
+         (offset (org-other-agenda--viewport-offset 'agenda))
+         (parent (org-other-agenda--agenda-viewport-parent items offset)))
     (when items
       (list (list :type :flex :direction :column :gap 0
                   :children
-                  (org-other-agenda--windowed
-                   items (org-other-agenda--viewport-offset 'agenda)
-                   'agenda 3
-                   (lambda (item ordinal)
-                     (org-other-agenda--agenda-item-element
-                      item todo-width ordinal))))))))
+                  (append
+                   (when parent (list parent))
+                   (org-other-agenda--windowed
+                    items offset 'agenda (+ 3 (if parent 1 0))
+                    (lambda (item ordinal)
+                      (org-other-agenda--agenda-item-element
+                       item todo-width ordinal)))))))))
 
 (defun org-other-agenda--someday-page (entries todo-width)
   "Render the undated-task page from `ENTRIES'.
@@ -1226,15 +1278,17 @@ sets the shared state-column width."
             (org-other-agenda--flex-row entry 'someday todo-width ordinal)))))
     (list
      (list :type 'ooa-text
-           :value (propertize
-                   "  Tasks without a date. Press s to schedule; press d to set a deadline."
-                   'face 'org-other-agenda-dim))
+           :value (org-other-agenda--parent-value
+                   (propertize
+                    "  Tasks without a date. Press s to schedule; press d to set a deadline."
+                    'face 'org-other-agenda-dim)))
      (if entries
          (list :type :flex :direction :column :gap 0
                :children windowed)
        (list :type 'ooa-text
-             :value (propertize "  Nothing without a date."
-                                'face 'org-other-agenda-dim))))))
+             :value (org-other-agenda--parent-value
+                     (propertize "  Nothing without a date."
+                                 'face 'org-other-agenda-dim)))))))
 
 (defun org-other-agenda--frame (width)
   "Build the complete frame for `WIDTH'.
@@ -1284,7 +1338,8 @@ Combine the tab bar, query bar, and selected page in a vertical layout."
        (org-other-agenda--tab-bar tab counts (org-other-agenda--tabs all))
        (org-other-agenda--query-bar
         query query-kind
-        (length entries))
+        (length entries)
+        query-view)
        (list :type :flex :direction :column :gap 0
            :layout (list :width width :min-width 40 :grow 1)
            :children
@@ -1304,29 +1359,46 @@ Combine the tab bar, query bar, and selected page in a vertical layout."
           (and (markerp hd) hd))
       (error nil))))
 
+(defun org-other-agenda--object-hd (position)
+  "Return the Org heading marker from the entry object at `POSITION'."
+  (let ((object (get-text-property position 'org-other-agenda-object)))
+    (and (consp object)
+         (eq (car object) 'org-heading)
+         (markerp (cdr object))
+         (cdr object))))
+
 (defun org-other-agenda--at-point ()
   "Return the `org-hd-marker' of the rendered entry at point.
 
 An entry's clickable widget may start after the fixed priority, status and
-time columns.  Prefer the button under point, then inspect the adjacent
-character and finally the rest of the current line so a point at the start of
-an entry row still selects that row."
+time columns.  Prefer the entry object or button under point, then inspect the
+adjacent character and finally the rest of the current line so a point at the
+start of an entry row still selects that row."
   (let* ((position (point))
          (button (or (get-char-property position 'button)
                      (and (> position (point-min))
                           (get-char-property (1- position) 'button))))
-         (hd (org-other-agenda--button-hd button)))
+         (hd (or (org-other-agenda--object-hd position)
+                 (and (> position (point-min))
+                      (org-other-agenda--object-hd (1- position)))
+                 (org-other-agenda--button-hd button))))
     (unless hd
       (save-excursion
         (goto-char (line-beginning-position))
         (let ((end (line-end-position)))
           (while (and (< (point) end) (not hd))
-            (setq hd (org-other-agenda--button-hd
-                      (get-char-property (point) 'button)))
+            (setq hd (or (org-other-agenda--object-hd (point))
+                         (org-other-agenda--button-hd
+                          (get-char-property (point) 'button))))
             (forward-char 1)))))
     (unless (and hd (marker-buffer hd))
       (user-error "No Org agenda entry at point"))
     hd))
+
+(defun org-other-agenda-entry-visit ()
+  "Visit the Org entry represented by the entry object at point."
+  (interactive)
+  (org-other-agenda-visit (org-other-agenda--at-point)))
 
 (defun org-other-agenda--shadow-position (hd &optional buffer)
   "Return the position of the first row for `HD' in hidden `BUFFER'."
@@ -1413,6 +1485,39 @@ an entry row still selects that row."
   (interactive)
   (org-other-agenda--forward #'org-agenda-set-tags))
 
+(defvar org-other-agenda-entry-map
+  (let ((map (make-sparse-keymap)))
+    ;; Emacs 31 exposes this as `widget-keymap'; use the more specific name
+    ;; when a future widget.el provides it.
+    (set-keymap-parent
+     map
+     (if (boundp 'widget-button-keymap)
+         (symbol-value 'widget-button-keymap)
+       (symbol-value 'widget-keymap)))
+    (define-key map (kbd "t") #'org-other-agenda-todo)
+    (define-key map (kbd "s") #'org-other-agenda-schedule)
+    (define-key map (kbd "d") #'org-other-agenda-deadline)
+    (define-key map (kbd ",") #'org-other-agenda-priority)
+    (define-key map (kbd ":") #'org-other-agenda-set-tags)
+    map)
+  "Keymap for direct actions on the rendered Org entry at point.
+
+The parent keeps widget RET, mouse, and entry-navigation behavior available on
+button text.  Plain entry cells use `org-other-agenda-entry-cell-map'.")
+
+(defvar org-other-agenda-entry-cell-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map org-other-agenda-entry-map)
+    ;; `widget-button-press' falls back to the global RET binding when point
+    ;; is on a fixed entry cell instead of the title button.  Shadow that
+    ;; fallback so RET remains a row action throughout plain entry text.
+    (define-key map (kbd "RET") #'org-other-agenda-entry-visit)
+    map)
+  "Keymap for non-button text belonging to a rendered Org entry.
+
+It inherits the direct actions and widget navigation from
+`org-other-agenda-entry-map', but gives fixed cells a useful RET action.")
+
 
 (defcustom org-other-agenda-series
   '((agenda "" ((org-agenda-span 'week)))
@@ -1436,22 +1541,16 @@ re-laid out together."
     (define-key map (kbd "g") #'org-other-agenda-refresh)
     (define-key map (kbd "/") #'org-other-agenda-search)
     (define-key map (kbd "\\") #'org-other-agenda-clear-search)
-    (define-key map (kbd "t") #'org-other-agenda-todo)
-    (define-key map (kbd "s") #'org-other-agenda-schedule)
-    (define-key map (kbd "d") #'org-other-agenda-deadline)
-    (define-key map (kbd ",") #'org-other-agenda-priority)
-    (define-key map (kbd ":") #'org-other-agenda-set-tags)
     (define-key map (kbd "[") #'org-other-agenda-previous-day)
     (define-key map (kbd "]") #'org-other-agenda-next-day)
     (define-key map (kbd "n") #'org-other-agenda-next-line)
     (define-key map (kbd "p") #'org-other-agenda-previous-line)
-    (define-key map (kbd "C-n") #'org-other-agenda-next-line)
-    (define-key map (kbd "C-p") #'org-other-agenda-previous-line)
+    (define-key map (kbd "u") #'org-other-agenda-parent)
     (define-key map (kbd "C-v") #'org-other-agenda-page-down)
     (define-key map (kbd "M-v") #'org-other-agenda-page-up)
     (define-key map [next] #'org-other-agenda-page-down)
     (define-key map [prior] #'org-other-agenda-page-up)
-    (dotimes (i 7)
+    (dotimes (i 6)
       (define-key map (kbd (number-to-string (1+ i)))
                   (lambda () (interactive) (org-other-agenda-select-tab i))))
     map)
@@ -1481,7 +1580,74 @@ re-laid out together."
              (offset (org-other-agenda--viewport-offset scope))
              (next (max 0 (+ offset amount))))
         (unless (= offset next)
-          (textui-set-state (current-buffer) key next))))))
+          (textui-set-state (current-buffer) key next)
+          next)))))
+
+(defun org-other-agenda--object-position-on-line ()
+  "Return the preferred entry-object position on the current line.
+
+Prefer the title widget, whose `button' property identifies the row's title
+cell.  Fixed cells and time-block text have the same entry object but no
+button, so fall back to their first object-bearing character."
+  (save-excursion
+    (let ((end (line-end-position)) first title)
+      (goto-char (line-beginning-position))
+      (while (< (point) end)
+        (when (get-text-property (point) 'org-other-agenda-object)
+          (unless first
+            (setq first (point)))
+          (when (get-char-property (point) 'button)
+            (unless title
+              (setq title (point)))))
+        (forward-char 1))
+      (or title first))))
+
+(defun org-other-agenda--next-object-position (direction)
+  "Return the next object row position in `DIRECTION', or nil."
+  (save-excursion
+    (beginning-of-line)
+    (catch 'found
+      (while (= 0 (forward-line direction))
+        (when-let* ((position (org-other-agenda--object-position-on-line)))
+          (throw 'found position)))
+      nil)))
+
+(defun org-other-agenda--page-object-position (direction)
+  "Return the first or last object row position for `DIRECTION'."
+  (save-excursion
+    (goto-char (point-min))
+    (let (last)
+      (catch 'found
+        (while (< (point) (point-max))
+          (when-let* ((position (org-other-agenda--object-position-on-line)))
+            (if (> direction 0)
+                (setq last position)
+              (throw 'found position)))
+          (forward-line 1))
+        last))))
+
+(defun org-other-agenda--move-to-entry (direction)
+  "Move to the next or previous rendered entry in `DIRECTION'."
+  (setq org-other-agenda--movement-scrolled nil)
+  (let ((position (org-other-agenda--next-object-position direction)))
+    (if position
+        (goto-char position)
+      (let* ((scope (org-other-agenda--viewport-scope))
+             (key (and scope (org-other-agenda--viewport-key scope "offset"))))
+        (if (and key (org-other-agenda--viewport-scroll direction))
+            (progn
+              (setq org-other-agenda--movement-scrolled t)
+              ;; `textui-set-state' queues a refresh; movement needs the new
+              ;; rows synchronously so point can land on the row just exposed.
+              (textui-refresh (current-buffer))
+              (let ((position (org-other-agenda--page-object-position direction)))
+                (if position
+                    (goto-char position)
+                  (setq org-other-agenda--movement-scrolled nil)
+                  (message "No %s entry"
+                           (if (> direction 0) "next" "previous")))))
+          (message "No %s entry"
+                   (if (> direction 0) "next" "previous")))))))
 
 (defun org-other-agenda--agenda-scroll (amount)
   "Move the Agenda viewport by `AMOUNT' rows.
@@ -1493,14 +1659,44 @@ implementation; all tabs now use `org-other-agenda--viewport-scroll'."
     (message "Paging is available on the Agenda tab")))
 
 (defun org-other-agenda-next-line ()
-  "Show the next row in the current long-list viewport."
+  "Move point to the next rendered entry row."
   (interactive)
-  (org-other-agenda--viewport-scroll 1))
+  (org-other-agenda--move-to-entry 1))
 
 (defun org-other-agenda-previous-line ()
-  "Show the previous row in the current long-list viewport."
+  "Move point to the previous rendered entry row."
   (interactive)
-  (org-other-agenda--viewport-scroll -1))
+  (org-other-agenda--move-to-entry -1))
+
+(defun org-other-agenda--parent-position-on-line ()
+  "Return the first parent-property position on the current line, or nil."
+  (save-excursion
+    (let ((end (line-end-position)))
+      (goto-char (line-beginning-position))
+      (catch 'found
+        (while (< (point) end)
+          (when (get-text-property (point) 'org-other-agenda-parent)
+            (throw 'found (point)))
+          (forward-char 1))
+        nil))))
+
+(defun org-other-agenda-parent ()
+  "Move to the nearest date or section header above point.
+
+This is the one-dimensional parent relation for step 2; two-dimensional
+parent relationships are added in step 3."
+  (interactive)
+  (let ((position
+         (save-excursion
+           (beginning-of-line)
+           (catch 'found
+             (while (= 0 (forward-line -1))
+               (when-let* ((position (org-other-agenda--parent-position-on-line)))
+                 (throw 'found position)))
+             nil))))
+    (if position
+        (goto-char position)
+      (message "No parent header"))))
 
 (defun org-other-agenda--viewport-page (direction)
   "Move one viewport page in `DIRECTION'."
@@ -1522,22 +1718,28 @@ implementation; all tabs now use `org-other-agenda--viewport-scroll'."
 
 (defun org-other-agenda--follow-viewport ()
   "Keep a focused row inside the current long-list viewport."
-  (when (and (derived-mode-p 'textui-mode)
-             (org-other-agenda--viewport-scope))
-    (let* ((button (or (get-char-property (point) 'button)
+  (let ((skip org-other-agenda--movement-scrolled))
+    (setq org-other-agenda--movement-scrolled nil)
+    (unless skip
+      (when (and (derived-mode-p 'textui-mode)
+                 (org-other-agenda--viewport-scope))
+        (let* ((button (or (get-char-property (point) 'button)
+                           (and (> (point) (point-min))
+                                (get-char-property (1- (point)) 'button))))
+               (hd (or (org-other-agenda--object-hd (point))
                        (and (> (point) (point-min))
-                            (get-char-property (1- (point)) 'button))))
-           (hd (and button (org-other-agenda--button-hd button)))
-           (window (get-buffer-window (current-buffer) t)))
-      (when (and hd (window-live-p window))
-        (let* ((line (line-number-at-pos))
-               (top (with-current-buffer (window-buffer window)
-                      (line-number-at-pos (window-start window))))
-               (bottom (+ top (max 1 (1- (window-body-height window)))))
-               (delta (cond ((<= line (+ top 1)) -1)
-                            ((>= line (1- bottom)) 1))))
-          (when delta
-            (org-other-agenda--viewport-scroll delta)))))))
+                            (org-other-agenda--object-hd (1- (point))))
+                       (and button (org-other-agenda--button-hd button))))
+               (window (get-buffer-window (current-buffer) t)))
+          (when (and hd (window-live-p window))
+            (let* ((line (line-number-at-pos))
+                   (top (with-current-buffer (window-buffer window)
+                          (line-number-at-pos (window-start window))))
+                   (bottom (+ top (max 1 (1- (window-body-height window)))))
+                   (delta (cond ((<= line (+ top 1)) -1)
+                                ((>= line (1- bottom)) 1))))
+              (when delta
+                (org-other-agenda--viewport-scroll delta)))))))))
 
 (defun org-other-agenda-refresh ()
   "Regenerate the hidden agenda buffer and redraw."
@@ -1653,6 +1855,7 @@ is overridden.  The blocks shown come from `org-other-agenda-series'."
                                      :tags-offset 0
                                      :viewport-page-size 40))))
     (with-current-buffer buffer
+      (setq-local buffer-read-only t)
       (use-local-map (make-composed-keymap org-other-agenda-mode-map
                                            (current-local-map)))
       (add-hook 'post-command-hook #'org-other-agenda--follow-viewport nil t))

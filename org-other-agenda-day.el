@@ -134,14 +134,21 @@ then pads the cell to its declared `:width'."
   (cond ((eq kind 'life) 'ooa-blk-life) ((eq kind 'habit) 'ooa-blk-habit)
         (t 'ooa-blk-work)))
 
-(defun ooa-day--object-value (value hd)
-  "Add the rendered Org-heading object for marker `HD' to `VALUE'."
+(defun ooa-day--object-value (value hd &optional keymap)
+  "Add the rendered Org-heading object and KEYMAP for marker `HD' to `VALUE'.
+
+When KEYMAP is nil, use the entry-cell map when the main package has defined
+one."
   (let ((value (copy-sequence (or value ""))))
     (when (markerp hd)
-      (add-text-properties
-       0 (length value)
-       (list 'org-other-agenda-object (cons 'org-heading hd))
-       value))
+      (let* ((keymap (or keymap
+                         (and (boundp 'org-other-agenda-entry-cell-map)
+                              (symbol-value 'org-other-agenda-entry-cell-map))))
+             (properties
+              (list 'org-other-agenda-object (cons 'org-heading hd))))
+        (when keymap
+          (setq properties (append properties (list 'keymap keymap))))
+        (add-text-properties 0 (length value) properties value)))
     value))
 
 

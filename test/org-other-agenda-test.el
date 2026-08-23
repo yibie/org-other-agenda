@@ -91,21 +91,25 @@ user's global block selection."
       (kill-buffer old))
     (org-other-agenda--generate org-other-agenda-test--start-day)
     (let ((entries (org-other-agenda--entries)))
-      (textui-open name
-                   #'org-other-agenda--frame
-                   (list :entries entries
-                         :base-entries entries
-                         :query-entries nil
-                         :query nil
-                         :query-kind 'search
-                         :agenda-offset 0
-                         :agenda-page-size 40
-                         :day-offset 0
-                         :week-offset 0
-                         :someday-offset 0
-                         :search-offset 0
-                         :tags-offset 0
-                         :viewport-page-size 40)))))
+      (let ((view
+             (textui-open name
+                          #'org-other-agenda--frame
+                          (list :entries entries
+                                :base-entries entries
+                                :query-entries nil
+                                :query nil
+                                :query-kind 'search
+                                :agenda-offset 0
+                                :agenda-page-size 40
+                                :day-offset 0
+                                :week-offset 0
+                                :someday-offset 0
+                                :search-offset 0
+                                :tags-offset 0
+                                :viewport-page-size 40))))
+        (with-current-buffer view
+          (setq-local buffer-read-only t))
+        view))))
 
 (defun org-other-agenda-test--select-tab (view tab)
   "Select TAB in VIEW and synchronously render it."
@@ -167,6 +171,23 @@ user's global block selection."
       (should (equal (get-text-property 0 'org-marker target-title)
                      marker)))))
 
+(defun org-other-agenda-test--goto-rendered-entry (view title)
+  "Move point to a rendered object whose source heading is titled TITLE."
+  (with-current-buffer view
+    (let* ((entry
+            (cl-loop for key in '(:query-entries :entries :base-entries)
+                     thereis (org-other-agenda-test--entry-by-title
+                              (plist-get textui-state key) title)))
+           (marker (and entry (plist-get entry :hd))))
+      (when (markerp marker)
+        (goto-char (point-min))
+        (catch 'found
+          (while (< (point) (point-max))
+            (when (equal (org-other-agenda--object-hd (point)) marker)
+              (throw 'found t))
+            (forward-char 1))
+          nil)))))
+
 (defun org-other-agenda-test--titles (entries)
   "Return cleaned titles for ENTRIES."
   (mapcar #'org-other-agenda-test--title entries))
@@ -191,6 +212,155 @@ user's global block selection."
     (if (= (car ra) (car rb))
         (> (- (cdr ra) (car ra)) (- (cdr rb) (car rb)))
       (< (car ra) (car rb)))))
+
+(ert-deftest org-other-agenda-test-entry-keymap-resolves-actions ()
+  "Direct actions resolve from every rendered entry-object span."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (goto-char (point-min))
+          (should (search-forward "Monday standup" nil t))
+          (goto-char (1- (point)))
+          (should (eq (key-binding (kbd "t")) #'org-other-agenda-todo))
+          (should (eq (key-binding (kbd "RET"))
+                      #'widget-button-press))
+          (beginning-of-line)
+          (should (get-text-property (point) 'org-other-agenda-object))
+          (should (eq (key-binding (kbd "t")) #'org-other-agenda-todo))
+          (should (eq (key-binding (kbd "RET"))
+                      #'org-other-agenda-entry-visit))
+          (should (condition-case nil
+                      (progn (call-interactively (key-binding (kbd "RET")))
+                             t)
+                    (error nil)))
+          (should (markerp (org-other-agenda--at-point))))
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (goto-char (point-min))
+          (should (search-forward "Design review" nil t))
+          (goto-char (1- (point)))
+          (should (get-text-property (point) 'org-other-agenda-object))
+          (should (eq (key-binding (kbd "t")) #'org-other-agenda-todo))
+          (should (eq (key-binding (kbd "RET"))
+                      #'org-other-agenda-entry-visit))
+          (should (markerp (org-other-agenda--at-point))))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (goto-char (point-min))
+          (should (search-forward "──" nil t))
+          (beginning-of-line)
+          (should-not (eq (key-binding (kbd "t")) #'org-other-agenda-todo))
+          (should buffer-read-only))))))
+
+(ert-deftest org-other-agenda-test-mode-map-reserves-movement-keys ()
+  "The local map owns movement while actions and native line movement inherit."
+  (dolist (key '("t" "s" "d" "," ":" "C-n" "C-p"))
+    (should-not (lookup-key org-other-agenda-mode-map (kbd key))))
+  (dotimes (index 6)
+    (should (commandp (lookup-key org-other-agenda-mode-map
+                                  (kbd (number-to-string (1+ index)))))))
+  (should-not (lookup-key org-other-agenda-mode-map (kbd "7"))))
+
+(ert-deftest org-other-agenda-test-entry-movement-crosses-rows ()
+  "n and p move between the first two rendered entry rows."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (let* ((first-position (org-other-agenda--page-object-position -1))
+                 (first-object (and first-position
+                                    (get-text-property first-position
+                                                        'org-other-agenda-object))))
+            (should first-position)
+            (goto-char first-position)
+            (let* ((second-position
+                    (org-other-agenda--next-object-position 1))
+                   (second-object (and second-position
+                                       (get-text-property second-position
+                                                           'org-other-agenda-object))))
+              (should second-position)
+              (should second-object)
+              (org-other-agenda-next-line)
+              (should (equal (get-text-property (point)
+                                                 'org-other-agenda-object)
+                             second-object))
+              (should (= (point) (org-other-agenda--object-position-on-line)))
+              (org-other-agenda-previous-line)
+              (should (equal (get-text-property (point)
+                                                 'org-other-agenda-object)
+                             first-object))
+              (should (= (point) (org-other-agenda--object-position-on-line))))))))))
+
+(ert-deftest org-other-agenda-test-entry-movement-scrolls-at-page-edge ()
+  "n advances the offset and lands on the newly visible row at the edge."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 9)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (let* ((last-position (org-other-agenda--page-object-position 1))
+                 (old-offset (plist-get textui-state :agenda-offset)))
+            (should last-position)
+            (goto-char last-position)
+            (org-other-agenda-next-line)
+            (should (= (plist-get textui-state :agenda-offset)
+                       (1+ old-offset)))
+            (should (get-text-property (point) 'org-other-agenda-object))
+            (should (= (point) (org-other-agenda--object-position-on-line)))
+            (org-other-agenda-parent)
+            (should (get-text-property (point) 'org-other-agenda-parent))))))))
+
+(ert-deftest org-other-agenda-test-parent-moves-to-date-header ()
+  "u moves an agenda entry to its nearest date header."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (goto-char (point-min))
+          (should (search-forward "Monday standup" nil t))
+          (beginning-of-line)
+          (org-other-agenda-parent)
+          (should (looking-at "── Monday")))))))
+
+(ert-deftest org-other-agenda-test-parent-covers-every-entry-surface ()
+  "u reaches a parent from each page's one-dimensional entry surfaces."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (dolist (spec '((agenda "Monday standup")
+                        (day "Design review")
+                        (day "Ship the release notes")
+                        (week "Write the quarterly report")
+                        (week "Monday standup")
+                        (someday "Read the RFC")))
+          (org-other-agenda-test--select-tab view (car spec))
+          (with-current-buffer view
+            (should (org-other-agenda-test--goto-rendered-entry
+                     view (cadr spec)))
+            (org-other-agenda-parent)
+            (should (get-text-property (point)
+                                       'org-other-agenda-parent))))
+        (dolist (query-spec '((search "invitations" "Prepare the launch checklist")
+                              (tags "#build" "Draft the migration plan")))
+          (with-current-buffer view
+            (org-other-agenda-search (cadr query-spec)))
+          (textui-refresh view)
+          (org-other-agenda-test--select-tab view (car query-spec))
+          (with-current-buffer view
+            (should (org-other-agenda-test--goto-rendered-entry
+                     view (nth 2 query-spec)))
+            (org-other-agenda-parent)
+            (should (get-text-property (point)
+                                       'org-other-agenda-parent))))))))
 
 (ert-deftest org-other-agenda-test-shadow-buffer-is-hidden ()
   "Generated agenda data lives in a buffer that is shown in no window."

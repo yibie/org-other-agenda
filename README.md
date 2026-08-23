@@ -69,18 +69,21 @@ is in Agenda, everything without one is in Someday.
 
 ## Keys
 
-| Key | Action |
-|---|---|
-| `1`–`6` | switch tab |
-| `TAB` / `S-TAB` | move between entries |
-| `RET` or mouse-1 | visit the Org entry |
-| `t` `s` `d` `,` `:` | TODO state, schedule, deadline, priority, tags |
-| `/` | search |
-| `\` | clear the search |
-| `[` `]` | previous / next day |
-| `C-v` `M-v` | scroll a long list |
-| `g` | refresh |
-| `q` | quit |
+| Group | Key | Action |
+|---|---|---|
+| Move | `n` `p` | next / previous entry row |
+| Move | `u` | move to the nearest date or section header |
+| Move | `TAB` / `S-TAB` | move between focusable widgets |
+| Move | `[` `]` | previous / next day |
+| Move | `C-v` `M-v` | scroll a long list |
+| Act on the entry at point | `t` `s` `d` `,` `:` | TODO state, schedule, deadline, priority, tags |
+| Act on the entry at point | `RET` or mouse-1 | visit the Org entry |
+| Act on the entry at point | `embark-act` | open the Embark menu; the full `embark-org-heading-map` is available |
+| View | `1`–`6` | switch tab |
+| View | `/` | search |
+| View | `\` | clear the search |
+| View | `g` | refresh |
+| View | `q` | quit |
 
 The editing keys forward to the native `org-agenda-*` command for the entry at
 point, so your TODO sequences, logging and hooks all apply. The month calendar,
