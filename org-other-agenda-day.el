@@ -162,6 +162,14 @@ one."
                                   'org-other-agenda-marked nil value))))
     value))
 
+(defun ooa-day--occurrence (entry)
+  "Return source occurrence provenance for renderer ENTRY."
+  (list :hd (plist-get entry :hd)
+        :org-marker (plist-get entry :org-marker)
+        :day (plist-get entry :dayabs)
+        :type (plist-get entry :etype)
+        :agenda-type (plist-get entry :type)))
+
 
 ;; -- Calendar ----------------------------------------------------------
 (defun ooa-day--month-grid (sel-abs today-abs busy dead)
@@ -213,13 +221,9 @@ one."
                                 'org-other-agenda-object
                                 (cons 'ooa-day abs)
                                 'keymap
-                                (and (boundp 'org-other-agenda-day-map)
-                                     (make-composed-keymap
-                                      (list
-                                       (symbol-value
-                                        'org-other-agenda-day-map)
-                                       (symbol-value
-                                        'org-other-agenda-view-map)))))
+                                (and (boundp 'org-other-agenda--day-direct-map)
+                                     (symbol-value
+                                      'org-other-agenda--day-direct-map)))
                         :ca-abs abs
                         :layout (list :focus-id (list 'cal abs)))
                   cells)))
@@ -244,6 +248,16 @@ window, making the layout visually insubstantial.  Width beyond the cap remains
 blank, while exact-hour hairlines still span the full grid to preserve its grid
 structure."
   :type 'integer :group 'convenience)
+
+(defun ooa-day--timeblock-value (value lane row node &optional properties)
+  "Annotate time-block VALUE at LANE and ROW with NODE and PROPERTIES."
+  (apply #'ooa-day--navigation-value value
+         (append
+          (list 'org-other-agenda-place (list 'day-timeblock lane row)
+                'org-other-agenda-context
+                (list '(day-timeblock -1 -2))
+                'org-other-agenda-node node)
+          properties)))
 
 (defun ooa-day--timeblock (blocks width h0 h1 slot &optional day)
   "Render `BLOCKS' between `H0' and `H1' using `SLOT' minute increments.
@@ -282,31 +296,19 @@ DAY is the absolute date carried by slot and day nouns."
                           blocks)))
                   (if (null b)
                       (let ((value (make-string lw ?\s)))
-                        (if day
-                            (ooa-day--navigation-value
-                             value
-                             'org-other-agenda-place (list 'day-timeblock i row)
-                             'org-other-agenda-context
-                             (list '(day-timeblock -1 -2))
-                             'org-other-agenda-node
-                             (list 'time-cell mins (+ mins slot))
-                             'org-other-agenda-object
-                             (list 'ooa-slot day mins (+ mins slot))
-                             'org-other-agenda-targets
-                             (list (cons 'ooa-day day))
-                             'keymap
-                             (and (boundp 'org-other-agenda-slot-map)
-                                  (make-composed-keymap
-                                   (list
-                                    (symbol-value 'org-other-agenda-slot-map)
-                                    (symbol-value 'org-other-agenda-view-map)))))
-                          (ooa-day--navigation-value
-                           value
-                           'org-other-agenda-place (list 'day-timeblock i row)
-                           'org-other-agenda-context
-                           (list '(day-timeblock -1 -2))
-                           'org-other-agenda-node
-                           (list 'time-cell mins (+ mins slot)))))
+                        (ooa-day--timeblock-value
+                         value i row (list 'time-cell mins (+ mins slot))
+                         (and day
+                              (list
+                               'org-other-agenda-object
+                               (list 'ooa-slot day mins (+ mins slot))
+                               'org-other-agenda-targets
+                               (list (cons 'ooa-day day))
+                               'keymap
+                               (and
+                                (boundp 'org-other-agenda--slot-direct-map)
+                                (symbol-value
+                                 'org-other-agenda--slot-direct-map))))))
                     (let* ((kind (plist-get b :kind))
                            (top (= mins (plist-get b :start)))
                            (body
@@ -339,28 +341,17 @@ DAY is the absolute date carried by slot and day nouns."
                                          body (- lw 2) 0 ?\s))
                                 'face (ooa-day--blkface kind)))
                               (plist-get b :hd))))
-                        (if day
-                            (ooa-day--navigation-value
-                             value
-                             'org-other-agenda-place (list 'day-timeblock i row)
-                             'org-other-agenda-context
-                             (list '(day-timeblock -1 -2))
-                             'org-other-agenda-node
-                             (cons 'heading (plist-get b :title))
-                             'org-other-agenda-occurrence
-                             (plist-get b :occurrence)
-                             'org-other-agenda-targets
-                             (list (list 'ooa-slot day mins (+ mins slot))
-                                   (cons 'ooa-day day)))
-                          (ooa-day--navigation-value
-                           value
-                           'org-other-agenda-place (list 'day-timeblock i row)
-                           'org-other-agenda-context
-                           (list '(day-timeblock -1 -2))
-                           'org-other-agenda-node
-                           (cons 'heading (plist-get b :title))
-                           'org-other-agenda-occurrence
-                           (plist-get b :occurrence)))))))))
+                        (ooa-day--timeblock-value
+                         value i row (cons 'heading (plist-get b :title))
+                         (append
+                          (list 'org-other-agenda-occurrence
+                                (plist-get b :occurrence))
+                          (and day
+                               (list
+                                'org-other-agenda-targets
+                                (list
+                                 (list 'ooa-slot day mins (+ mins slot))
+                                 (cons 'ooa-day day))))))))))))
              (line (concat "  " label (mapconcat #'identity cells ""))))
         ;; Extend the hairline across the full grid width; otherwise the grid
         ;; pattern stops halfway after the block-width cap.
@@ -502,13 +493,7 @@ infer the absolute start and end dates."
                           (cl-find abs (plist-get sp :occurrences)
                                    :key (lambda (candidate)
                                           (plist-get candidate :dayabs))))
-                         (occurrence
-                          (and entry
-                               (list :hd (plist-get entry :hd)
-                                     :org-marker (plist-get entry :org-marker)
-                                     :day (plist-get entry :dayabs)
-                                     :type (plist-get entry :etype)
-                                     :agenda-type (plist-get entry :type)))))
+                         (occurrence (and entry (ooa-day--occurrence entry))))
                     (add-text-properties
                      beg end
                      (list 'org-other-agenda-place

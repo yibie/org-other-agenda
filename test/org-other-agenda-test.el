@@ -306,14 +306,14 @@ user's global block selection."
       (let ((view (org-other-agenda-test--open-view)))
         (org-other-agenda-test--select-tab view 'agenda)
         (with-current-buffer view
-          (let* ((first-position (org-other-agenda--page-object-position -1))
+          (let* ((first-position (org-other-agenda--page-heading-position -1))
                  (first-object (and first-position
                                     (get-text-property first-position
                                                         'org-other-agenda-object))))
             (should first-position)
             (goto-char first-position)
             (let* ((second-position
-                    (org-other-agenda--next-object-position 1))
+                    (org-other-agenda--next-heading-position 1))
                    (second-object (and second-position
                                        (get-text-property second-position
                                                            'org-other-agenda-object))))
@@ -323,12 +323,34 @@ user's global block selection."
               (should (equal (get-text-property (point)
                                                  'org-other-agenda-object)
                              second-object))
-              (should (= (point) (org-other-agenda--object-position-on-line)))
+              (should (= (point) (org-other-agenda--heading-position-on-line)))
               (org-other-agenda-previous-line)
               (should (equal (get-text-property (point)
                                                  'org-other-agenda-object)
                              first-object))
-              (should (= (point) (org-other-agenda--object-position-on-line))))))))))
+              (should (= (point) (org-other-agenda--heading-position-on-line))))))))))
+
+(ert-deftest org-other-agenda-test-entry-movement-skips-non-heading-nouns ()
+  "n and p skip day and slot nouns on every page that renders them."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (dolist (tab '(agenda day week))
+          (org-other-agenda-test--select-tab view tab)
+          (with-current-buffer view
+            (goto-char (point-min))
+            (org-other-agenda-next-line)
+            (should (eq (car-safe
+                         (get-text-property
+                          (point) 'org-other-agenda-object))
+                        'org-heading))
+            (goto-char (point-max))
+            (org-other-agenda-previous-line)
+            (should (eq (car-safe
+                         (get-text-property
+                          (point) 'org-other-agenda-object))
+                        'org-heading))))))))
 
 (ert-deftest org-other-agenda-test-entry-movement-scrolls-at-page-edge ()
   "n advances the offset and lands on the newly visible row at the edge."
@@ -338,7 +360,7 @@ user's global block selection."
       (let ((view (org-other-agenda-test--open-view)))
         (org-other-agenda-test--select-tab view 'agenda)
         (with-current-buffer view
-          (let* ((last-position (org-other-agenda--page-object-position 1))
+          (let* ((last-position (org-other-agenda--page-heading-position 1))
                  (old-offset (plist-get textui-state :agenda-offset)))
             (should last-position)
             (goto-char last-position)
@@ -346,7 +368,7 @@ user's global block selection."
             (should (= (plist-get textui-state :agenda-offset)
                        (1+ old-offset)))
             (should (get-text-property (point) 'org-other-agenda-object))
-            (should (= (point) (org-other-agenda--object-position-on-line)))
+            (should (= (point) (org-other-agenda--heading-position-on-line)))
             (org-other-agenda-parent)
             (should (get-text-property (point) 'org-other-agenda-parent))))))))
 
@@ -937,8 +959,51 @@ so this regression needs its own file."
                      (get-text-property
                       (overlay-start overlay) 'org-other-agenda-place)
                      place)))
-          (should (string-match-p "agenda.*Monday standup"
-                                  (org-other-agenda--eldoc))))))))
+          (let ((eldoc (org-other-agenda--eldoc)))
+            (should
+             (string-match-p
+              "\\`agenda · [^·]+ · [0-9]+/[0-9]+ · Monday standup\\'"
+              eldoc))
+            (should-not (string-match-p " · col " eldoc))))))))
+
+(ert-deftest org-other-agenda-test-feedback-counts-rendered-structure ()
+  "Calendar and time-block totals come from their rendered places."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (should (= 6 (org-other-agenda--panel-row-count
+                        'day-calendar 0)))
+          (should (= 20 (org-other-agenda--panel-row-count
+                         'day-timeblock 0)))
+          (goto-char (org-other-agenda--position-for-place
+                      '(day-timeblock 0 0)))
+          (should
+           (string-match-p
+            "\\`day · time blocks · 1/20 · "
+            (org-other-agenda--eldoc))))))))
+
+(ert-deftest org-other-agenda-test-single-mark-gesture-can-end-in-place ()
+  "A documented in-place m ends the rectangle gesture but keeps its mark."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view)))
+      (org-other-agenda-test--select-tab view 'week)
+      (with-current-buffer view
+        (should (org-other-agenda-test--goto-rendered-entry
+                 view "Monday standup"))
+        (org-other-agenda-mark)
+        (should (plist-get textui-state :rectangle-anchor))
+        (org-other-agenda-mark)
+        (should-not (plist-get textui-state :rectangle-anchor))
+        (should (= 1 (length (org-other-agenda--marked-headings)))))
+      (org-other-agenda-test--select-tab view 'day)
+      (with-current-buffer view
+        (should (org-other-agenda-test--goto-rendered-entry
+                 view "Design review"))
+        (org-other-agenda-mark)
+        (should (= 2 (length (org-other-agenda--marked-headings))))))))
 
 (ert-deftest org-other-agenda-test-nested-targets-use-verified-order ()
   "Occupied and empty Today cells expose the confirmed Embark target order."
