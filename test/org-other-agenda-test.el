@@ -225,6 +225,26 @@ user's global block selection."
           (should (search-forward "Monday standup" nil t))
           (goto-char (1- (point)))
           (should (eq (key-binding (kbd "t")) #'org-other-agenda-todo))
+          (should (eq (key-binding (kbd "m")) #'org-other-agenda-mark))
+          (should (eq (key-binding (kbd "B"))
+                      #'org-other-agenda-bulk-action))
+          (dolist (binding '(("n" . org-other-agenda-next-line)
+                             ("p" . org-other-agenda-previous-line)
+                             ("u" . org-other-agenda-parent)
+                             ("<left>" . org-other-agenda-left)
+                             ("M-n" . org-other-agenda-next-panel)))
+            (should (eq (key-binding (kbd (car binding)))
+                        (cdr binding))))
+          (dolist (binding '(("C-n" . next-line)
+                             ("C-p" . previous-line)
+                             ("C-f" . forward-char)
+                             ("C-b" . backward-char)))
+            (should (eq (key-binding (kbd (car binding)))
+                        (cdr binding))))
+          (should (eq (key-binding (kbd "S-<right>"))
+                      #'org-other-agenda-date-later))
+          (should (eq (key-binding (kbd "S-<up>"))
+                      #'org-other-agenda-priority-up))
           (should (eq (key-binding (kbd "RET"))
                       #'widget-button-press))
           (beginning-of-line)
@@ -258,6 +278,20 @@ user's global block selection."
 (ert-deftest org-other-agenda-test-mode-map-reserves-movement-keys ()
   "The local map owns movement while actions and native line movement inherit."
   (dolist (key '("t" "s" "d" "," ":" "C-n" "C-p"))
+    (should-not (lookup-key org-other-agenda-mode-map (kbd key))))
+  (dolist (binding '(("<left>" . org-other-agenda-left)
+                     ("<right>" . org-other-agenda-right)
+                     ("<up>" . org-other-agenda-up)
+                     ("<down>" . org-other-agenda-down)
+                     ("M-n" . org-other-agenda-next-panel)
+                     ("M-p" . org-other-agenda-previous-panel)
+                     ("m" . org-other-agenda-mark)
+                     ("U" . org-other-agenda-unmark-all)
+                     ("B" . org-other-agenda-bulk-action)))
+    (should (eq (lookup-key org-other-agenda-mode-map (kbd (car binding)))
+                (cdr binding))))
+  (dolist (key '("S-<left>" "S-<right>" "S-<up>" "S-<down>"
+                 "M-<left>" "M-<right>" "M-<up>" "M-<down>"))
     (should-not (lookup-key org-other-agenda-mode-map (kbd key))))
   (dotimes (index 6)
     (should (commandp (lookup-key org-other-agenda-mode-map
@@ -436,7 +470,7 @@ user's global block selection."
   "The Embark finder returns an Org-heading target only for entry rows."
   (org-other-agenda-test--with-fixture
     (let ((view (org-other-agenda-test--open-view)))
-      (should (memq #'org-other-agenda-embark-target embark-target-finders))
+      (should (memq #'org-other-agenda-embark-targets embark-target-finders))
       (org-other-agenda-test--select-tab view 'agenda)
       (with-current-buffer view
         (goto-char (point-min))
@@ -736,5 +770,711 @@ so this regression needs its own file."
                      (org-other-agenda-test--titles (nth 2 (car first))))))
       (should (equal (org-other-agenda-test--titles (cdr second))
                      (org-other-agenda-test--titles (cdr first)))))))
+
+(ert-deftest org-other-agenda-test-structural-place-survives-page-size ()
+  "An occurrence keeps its absolute place when the viewport size changes."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view)))
+      (org-other-agenda-test--select-tab view 'agenda)
+      (with-current-buffer view
+        (should (org-other-agenda-test--goto-rendered-entry
+                 view "Monday standup"))
+        (let ((place (org-other-agenda--place-at-point)))
+          (should (equal (car place) 'agenda))
+          (setq textui-state
+                (plist-put textui-state :viewport-page-size 18))
+          (textui-refresh view)
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "Monday standup"))
+          (should (equal (org-other-agenda--place-at-point) place)))))))
+
+(ert-deftest org-other-agenda-test-week-uses-one-panel-offset ()
+  "Unequal Week columns share one clamp and expose a clamped row once."
+  (let ((file (make-temp-file "org-other-agenda-week-motion-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n* Week motion\n")
+            (dotimes (index 20)
+              (insert (format "** TODO Thursday %02d\n   SCHEDULED: <2026-08-20 Thu>\n"
+                              index)))
+            (dotimes (index 2)
+              (insert (format "** TODO Friday %02d\n   SCHEDULED: <2026-08-21 Fri>\n"
+                              index))))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (with-current-buffer view
+                (setq textui-state (plist-put textui-state :tab 'week))
+                (setq textui-state
+                      (plist-put textui-state :viewport-page-size 15))
+                (setq textui-state (plist-put textui-state :week-offset 10))
+                (textui-refresh view)
+                (should (= 10 (plist-get textui-state :week-offset)))
+                (goto-char (org-other-agenda--position-for-place
+                            '(week-days 3 10)))
+                (let ((original (symbol-function 'textui-refresh))
+                      (refreshes 0))
+                  (cl-letf (((symbol-function 'textui-refresh)
+                             (lambda (&rest arguments)
+                               (setq refreshes (1+ refreshes))
+                               (apply original arguments))))
+                    (org-other-agenda-right))
+                  (should (= refreshes 1)))
+                (should (equal (org-other-agenda--place-at-point)
+                               '(week-days 4 1)))
+                (should (= 1 (plist-get textui-state :week-offset)))
+                ;; Wednesday is genuinely empty, so horizontal movement lands
+                ;; on its visible day header rather than inventing row zero.
+                (goto-char (org-other-agenda--position-for-place
+                            '(week-days 3 1)))
+                (org-other-agenda-left)
+                (should (equal (org-other-agenda--place-at-point)
+                               '(week-days 2 -1)))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-arrows-obey-panel-boundaries ()
+  "Bare arrows move point structurally and preserve state at a boundary."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view)))
+      (org-other-agenda-test--select-tab view 'day)
+      (with-current-buffer view
+        (goto-char (org-other-agenda--position-for-place
+                    '(day-calendar 3 0)))
+        (org-other-agenda-left)
+        (should (equal (org-other-agenda--place-at-point)
+                       '(day-calendar 2 0)))
+        (org-other-agenda-down)
+        (should (equal (org-other-agenda--place-at-point)
+                       '(day-calendar 2 1))))
+      (org-other-agenda-test--select-tab view 'agenda)
+      (with-current-buffer view
+        (should (org-other-agenda-test--goto-rendered-entry
+                 view "Monday standup"))
+        (let ((position (point))
+              (state (copy-tree textui-state)))
+          (org-other-agenda-left)
+          (should (= position (point)))
+          (should (equal state textui-state)))))))
+
+(ert-deftest org-other-agenda-test-parent-follows-explicit-context-chain ()
+  "Entries reach their container and panel titles through explicit context."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "Monday standup"))
+          (org-other-agenda-parent)
+          (should (eq (car (org-other-agenda--place-at-point)) 'agenda))
+          (should (= (nth 2 (org-other-agenda--place-at-point))
+                     (org-other-agenda--agenda-container-row
+                      (org-other-agenda--agenda-items
+                       (org-other-agenda--page-entries 'agenda))
+                      (1+ (nth 2 (org-other-agenda--place-at-point))))))
+          (org-other-agenda-parent)
+          (should (equal (org-other-agenda--place-at-point)
+                         '(agenda -1 -2))))
+        (org-other-agenda-test--select-tab view 'week)
+        (with-current-buffer view
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "Monday standup"))
+          (org-other-agenda-parent)
+          (should (= -1 (nth 2 (org-other-agenda--place-at-point))))
+          (org-other-agenda-parent)
+          (should (equal (org-other-agenda--place-at-point)
+                         '(week-days -1 -2))))
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "1:1 with the designer"))
+          (org-other-agenda-parent)
+          (should (equal (org-other-agenda--place-at-point)
+                         '(day-overflow -1 -2))))))))
+
+(ert-deftest org-other-agenda-test-panel-motion-is-ordered-and-nonwrapping ()
+  "Panel movement follows the confirmed Today order without wrapping."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (goto-char (org-other-agenda--position-for-place
+                      '(day-calendar 0 0)))
+          (org-other-agenda-next-panel)
+          (should (eq (car (org-other-agenda--place-at-point))
+                      'day-timeblock))
+          (org-other-agenda-next-panel)
+          (should (eq (car (org-other-agenda--place-at-point))
+                      'day-overflow))
+          (org-other-agenda-next-panel)
+          (should (eq (car (org-other-agenda--place-at-point))
+                      'day-other))
+          (let ((position (point))
+                (state (copy-tree textui-state)))
+            (org-other-agenda-next-panel)
+            (should (= position (point)))
+            (should (equal state textui-state))))))))
+
+(ert-deftest org-other-agenda-test-structural-feedback-matches-place ()
+  "Overlay feedback and Eldoc describe the same structural place."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view)))
+      (org-other-agenda-test--select-tab view 'agenda)
+      (with-current-buffer view
+        (should (org-other-agenda-test--goto-rendered-entry
+                 view "Monday standup"))
+        (let ((place (org-other-agenda--place-at-point)))
+          (org-other-agenda--update-current-feedback)
+          (should org-other-agenda--current-object-overlays)
+          (dolist (overlay org-other-agenda--current-object-overlays)
+            (should (eq (overlay-get overlay 'face)
+                        'org-other-agenda-current-object))
+            (should (equal
+                     (get-text-property
+                      (overlay-start overlay) 'org-other-agenda-place)
+                     place)))
+          (should (string-match-p "agenda.*Monday standup"
+                                  (org-other-agenda--eldoc))))))))
+
+(ert-deftest org-other-agenda-test-nested-targets-use-verified-order ()
+  "Occupied and empty Today cells expose the confirmed Embark target order."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "Design review"))
+          (should (equal (mapcar #'car
+                                 (org-other-agenda-embark-targets))
+                         '(org-heading ooa-slot ooa-day)))
+          (should (equal
+                   (mapcar (lambda (target) (plist-get target :type))
+                           (cl-subseq (embark--targets) 0 3))
+                   '(org-heading ooa-slot ooa-day)))
+          (goto-char (point-min))
+          (let (empty-position)
+            (while (and (< (point) (point-max)) (null empty-position))
+              (when (eq (car-safe
+                         (get-text-property
+                          (point) 'org-other-agenda-object))
+                        'ooa-slot)
+                (setq empty-position (point)))
+              (goto-char
+               (or (next-single-property-change
+                    (point) 'org-other-agenda-object nil (point-max))
+                   (point-max))))
+            (should empty-position)
+            (goto-char empty-position)
+            (should (equal (mapcar #'car
+                                   (org-other-agenda-embark-targets))
+                           '(ooa-slot ooa-day)))
+            (should (eq (key-binding (kbd "s"))
+                        #'org-other-agenda-schedule-set-here))
+            (should (eq (key-binding (kbd "m"))
+                        #'org-other-agenda-mark))
+            (should (eq (key-binding (kbd "u"))
+                        #'org-other-agenda-parent))
+            (should (eq (key-binding (kbd "q")) #'quit-window))
+            (let ((place (org-other-agenda--place-at-point)))
+              (org-other-agenda-mark)
+              (should (equal (plist-get textui-state :rectangle-anchor)
+                             place))
+              (should-not (org-other-agenda--marked-headings))
+              (org-other-agenda-unmark-all))
+            (should (eq (keymap-lookup org-other-agenda-day-map "m")
+                        #'org-other-agenda-mark-day))
+            (should (eq (keymap-lookup org-other-agenda-day-map "s")
+                        #'org-other-agenda-schedule-set-here))
+            (should-not (keymap-lookup org-other-agenda-day-map "g"))))))))
+
+(ert-deftest org-other-agenda-test-day-targets-cover-three-surfaces ()
+  "Today calendar, Week headings and Agenda headers expose `ooa-day'."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (goto-char (org-other-agenda--position-for-place
+                      '(day-calendar 3 2)))
+          (should (equal (mapcar #'car
+                                 (org-other-agenda-embark-targets))
+                         '(ooa-day)))
+          (should (eq (key-binding (kbd "RET")) #'widget-button-press)))
+        (org-other-agenda-test--select-tab view 'week)
+        (with-current-buffer view
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "Monday standup"))
+          (should (equal (mapcar #'car
+                                 (org-other-agenda-embark-targets))
+                         '(org-heading ooa-day))))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (goto-char (point-min))
+          (should (search-forward "──" nil t))
+          (beginning-of-line)
+          (should (equal (mapcar #'car
+                                 (org-other-agenda-embark-targets))
+                         '(ooa-day))))))))
+
+(ert-deftest org-other-agenda-test-shift-action-refreshes-agenda-type ()
+  "A Shift action preserves prefix and refreshes mixed-series component type."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view)) seen-prefix seen-type)
+      (org-other-agenda-test--select-tab view 'someday)
+      (with-current-buffer view
+        (should (org-other-agenda-test--goto-rendered-entry view "Read the RFC"))
+        (cl-letf (((symbol-function 'org-agenda-priority-up)
+                   (lambda ()
+                     (interactive)
+                     (setq seen-prefix current-prefix-arg
+                           seen-type org-agenda-type))))
+          (let ((current-prefix-arg '(4)))
+            (org-other-agenda-priority-up)))
+        (should (equal seen-prefix '(4)))
+        (should (eq seen-type 'todo))
+        (should-error (org-other-agenda-date-later)
+                      :type 'error)))))
+
+(ert-deftest org-other-agenda-test-date-shift-uses-exact-org-marker ()
+  "Same-type timestamp occurrences are moved independently and point follows."
+  (let ((file (make-temp-file "org-other-agenda-occurrence-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* TODO Collision\n"
+                    "  SCHEDULED: <2026-08-20 Thu 09:00>\n"
+                    "  <2026-08-20 Thu 12:00>\n"
+                    "  <2026-08-20 Thu 15:00>\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'agenda)
+              (with-current-buffer view
+                (goto-char (point-min))
+                (let (chosen chosen-position)
+                  (while (< (point) (point-max))
+                    (let ((occurrence
+                           (get-text-property
+                            (point) 'org-other-agenda-occurrence)))
+                      (when (and (equal (plist-get occurrence :type)
+                                        "timestamp")
+                                 (or (null chosen)
+                                     (> (marker-position
+                                         (plist-get occurrence :org-marker))
+                                        (marker-position
+                                         (plist-get chosen :org-marker)))))
+                        (setq chosen occurrence
+                              chosen-position (point))))
+                    (goto-char
+                     (or (next-single-property-change
+                          (point) 'org-other-agenda-occurrence nil (point-max))
+                         (point-max))))
+                  (should chosen-position)
+                  (goto-char chosen-position)
+                  (let ((source-buffer (marker-buffer (plist-get chosen :hd)))
+                        (source-position
+                         (marker-position
+                          (org-other-agenda--occurrence-anchor chosen))))
+                    (let ((current-prefix-arg 1))
+                      (org-other-agenda-date-later))
+                    (with-current-buffer source-buffer
+                      (save-excursion
+                        (goto-char (point-min))
+                        (should (search-forward "<2026-08-20 Thu 12:00>" nil t))
+                        (should (search-forward "<2026-08-21 Fri 15:00>" nil t))))
+                    (should
+                     (let ((actual
+                            (plist-get
+                             (org-other-agenda--occurrence-at-point)
+                             :org-marker)))
+                       (and (eq source-buffer (marker-buffer actual))
+                            (= source-position
+                               (marker-position actual)))))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-week-shift-right-follows-heading ()
+  "The final Week scenario moves one occurrence right and follows it."
+  (let ((file (make-temp-file "org-other-agenda-week-shift-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* TODO Move me\n"
+                    "  SCHEDULED: <2026-08-20 Thu>\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'week)
+              (with-current-buffer view
+                (should (org-other-agenda-test--goto-rendered-entry
+                         view "Move me"))
+                (should (= 3 (nth 1 (org-other-agenda--place-at-point))))
+                (org-other-agenda-date-later)
+                (should (= 4 (nth 1 (org-other-agenda--place-at-point))))
+                (with-current-buffer
+                    (marker-buffer (org-other-agenda--at-point))
+                  (save-excursion
+                    (goto-char (point-min))
+                    (should (search-forward "<2026-08-21 Fri>" nil t))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-week-range-shift-preserves-native-semantics ()
+  "A Week bar delegates range movement to Org and follows the shifted bar."
+  (let ((file (make-temp-file "org-other-agenda-range-shift-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* TODO Range task\n"
+                    "  <2026-08-18 Tue>--<2026-08-21 Fri>\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'week)
+              (with-current-buffer view
+                (goto-char (point-min))
+                (should (search-forward "Range task" nil t))
+                (goto-char (- (point) (length "Range task")))
+                (should (= 1 (nth 1 (org-other-agenda--place-at-point))))
+                (org-other-agenda-date-later)
+                (should (= 2 (nth 1 (org-other-agenda--place-at-point))))
+                (with-current-buffer
+                    (marker-buffer (org-other-agenda--at-point))
+                  (save-excursion
+                    (goto-char (point-min))
+                    (should
+                     (search-forward
+                      "<2026-08-19 Wed>--<2026-08-22 Sat>" nil t))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-mark-deduplicates-and-highlights-occurrences ()
+  "One heading mark highlights every independently rendered occurrence."
+  (let ((file (make-temp-file "org-other-agenda-marks-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* TODO Repeated heading\n"
+                    "  <2026-08-20 Thu 09:00>\n"
+                    "  <2026-08-20 Thu 12:00>\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'agenda)
+              (with-current-buffer view
+                (should (org-other-agenda-test--goto-rendered-entry
+                         view "Repeated heading"))
+                (org-other-agenda-mark)
+                (should (= 1 (length (org-other-agenda--marked-headings))))
+                (let ((marked (car (org-other-agenda--marked-headings)))
+                      places)
+                  (goto-char (point-min))
+                  (while (< (point) (point-max))
+                    (let ((hd (org-other-agenda--object-hd (point))))
+                      (when (and hd
+                                 (org-other-agenda--heading-marked-p hd))
+                        (cl-pushnew
+                         (get-text-property
+                          (point) 'org-other-agenda-place)
+                         places :test #'equal)
+                        (let ((face (get-text-property (point) 'face)))
+                          (should
+                           (or (eq face 'org-other-agenda-marked)
+                               (and (listp face)
+                                    (memq 'org-other-agenda-marked face)))))))
+                    (goto-char
+                     (or (next-single-property-change
+                          (point) 'org-other-agenda-object nil (point-max))
+                         (point-max))))
+                  (should (>= (length places) 2))
+                  (should (buffer-live-p (marker-buffer marked))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-week-rectangle-crosses-viewport ()
+  "A structural rectangle survives refresh and marks off-screen Week rows."
+  (let ((file (make-temp-file "org-other-agenda-rectangle-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n* Rectangle\n")
+            (dolist (day '("20 Thu" "21 Fri"))
+              (dotimes (index 12)
+                (insert (format "** TODO %s task %02d\n   SCHEDULED: <2026-08-%s>\n"
+                                day index day)))))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (with-current-buffer view
+                (setq textui-state (plist-put textui-state :tab 'week))
+                (setq textui-state
+                      (plist-put textui-state :viewport-page-size 15))
+                (textui-refresh view)
+                (goto-char (org-other-agenda--position-for-place
+                            '(week-days 3 0)))
+                (org-other-agenda-mark)
+                (should (equal (plist-get textui-state :rectangle-anchor)
+                               '(week-days 3 0)))
+                (org-other-agenda--expose-place '(week-days 4 9))
+                (goto-char (org-other-agenda--position-for-place
+                            '(week-days 4 9)))
+                (org-other-agenda-mark)
+                (should-not (plist-get textui-state :rectangle-anchor))
+                (should (> (plist-get textui-state :week-offset) 0))
+                (should (= 20 (length (org-other-agenda--marked-headings))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-day-mark-and-unmark-use-one-set ()
+  "Day marking feeds the same heading set and U clears it."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view)))
+      (org-other-agenda-test--select-tab view 'day)
+      (with-current-buffer view
+        (goto-char (point-min))
+        (let (position)
+          (while (and (< (point) (point-max)) (null position))
+            (when (equal (get-text-property
+                          (point) 'org-other-agenda-object)
+                         (cons 'ooa-day org-other-agenda-test--today))
+              (setq position (point)))
+            (forward-char 1))
+          (should position)
+          (goto-char position)
+          (org-other-agenda-mark-day)
+          (should (> (length (org-other-agenda--marked-headings)) 1))
+          (dolist (hd (org-other-agenda--day-headings
+                       org-other-agenda-test--today))
+            (should (org-other-agenda--heading-marked-p hd)))
+          (org-other-agenda-unmark-all)
+          (should-not (org-other-agenda--marked-headings)))))))
+
+(ert-deftest org-other-agenda-test-week-rectangle-runs-native-bulk-todo ()
+  "The final rectangle scenario delegates B t once per unique heading."
+  (let ((file (make-temp-file "org-other-agenda-bulk-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n* Bulk\n"
+                    "** TODO Thursday one\n   SCHEDULED: <2026-08-20 Thu>\n"
+                    "** TODO Thursday two\n   SCHEDULED: <2026-08-20 Thu>\n"
+                    "** TODO Friday one\n   SCHEDULED: <2026-08-21 Fri>\n"
+                    "** TODO Friday two\n   SCHEDULED: <2026-08-21 Fri>\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'week)
+              (with-current-buffer view
+                (goto-char (org-other-agenda--position-for-place
+                            '(week-days 3 0)))
+                (org-other-agenda-mark)
+                (goto-char (org-other-agenda--position-for-place
+                            '(week-days 4 1)))
+                (org-other-agenda-mark)
+                (should (= 4 (length (org-other-agenda--marked-headings))))
+                (cl-letf (((symbol-function 'read-char-exclusive)
+                           (lambda (&rest _arguments) ?t))
+                          ((symbol-function 'completing-read)
+                           (lambda (&rest _arguments) "DONE")))
+                  (org-other-agenda-bulk-action))
+                (should-not (org-other-agenda--marked-headings)))
+              (with-current-buffer (find-file-noselect file)
+                (goto-char (point-min))
+                (should (= 4 (how-many "^\\*\\* DONE "
+                                       (point-min) (point-max))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-bulk-error-preserves-marks-and-effects ()
+  "A native bulk error preserves package marks and does not roll back effects."
+  (let ((file (make-temp-file "org-other-agenda-bulk-error-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* TODO First\n  SCHEDULED: <2026-08-20 Thu>\n"
+                    "* TODO Second\n  SCHEDULED: <2026-08-20 Thu>\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'week)
+              (with-current-buffer view
+                (goto-char (org-other-agenda--position-for-place
+                            '(week-days 3 0)))
+                (org-other-agenda-mark)
+                (goto-char (org-other-agenda--position-for-place
+                            '(week-days 3 1)))
+                (org-other-agenda-mark)
+                (cl-letf (((symbol-function 'org-agenda-bulk-action)
+                           (lambda (&optional _arg)
+                             (interactive "P")
+                             (goto-char
+                              (text-property-any
+                               (point-min) (point-max) 'org-hd-marker
+                               (car org-agenda-bulk-marked-entries)))
+                             (org-agenda-todo "DONE")
+                             (error "Synthetic native failure"))))
+                  (should-error (org-other-agenda-bulk-action)
+                                :type 'error))
+                (should (= 2 (length (org-other-agenda--marked-headings))))
+                (with-current-buffer (find-file-noselect file)
+                  (goto-char (point-min))
+                  (should (= 1 (how-many "^\\* DONE "
+                                         (point-min) (point-max)))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-empty-slot-schedules-marked-heading ()
+  "The final Today scenario schedules a marked heading at an empty slot."
+  (let ((file (make-temp-file "org-other-agenda-slot-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n* TODO Put me here\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'someday)
+              (with-current-buffer view
+                (should (org-other-agenda-test--goto-rendered-entry
+                         view "Put me here"))
+                (org-other-agenda-mark))
+              (org-other-agenda-test--select-tab view 'day)
+              (with-current-buffer view
+                (goto-char (org-other-agenda--position-for-place
+                            '(day-timeblock 0 3)))
+                (should (eq (key-binding (kbd "s"))
+                            #'org-other-agenda-schedule-set-here))
+                (org-other-agenda-schedule-set-here)
+                (should-not (org-other-agenda--marked-headings)))
+              (with-current-buffer (find-file-noselect file)
+                (goto-char (point-min))
+                (should (search-forward
+                         "SCHEDULED: <2026-08-20 Thu 09:30>" nil t)))))
+      (when (file-exists-p file)
+        (delete-file file))))))
+
+(ert-deftest org-other-agenda-test-schedule-set-continues-after-failure ()
+  "Schedule-set removes successes, retains failures, and reports both."
+  (let ((file (make-temp-file "org-other-agenda-schedule-set-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n* TODO First\n\n* TODO Second\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view))
+                  (original (symbol-function 'org-agenda-schedule))
+                  (calls 0))
+              (org-other-agenda-test--select-tab view 'someday)
+              (with-current-buffer view
+                (dolist (title '("First" "Second"))
+                  (should (org-other-agenda-test--goto-rendered-entry
+                           view title))
+                  (setq textui-state
+                        (plist-put
+                         textui-state :marked
+                         (org-other-agenda--add-marked-heading
+                          (org-other-agenda--at-point)
+                          (org-other-agenda--marked-headings)))))
+                (org-other-agenda-test--select-tab view 'day)
+                (goto-char (org-other-agenda--position-for-place
+                            '(day-timeblock 0 4)))
+                (let ((report
+                       (cl-letf (((symbol-function 'org-agenda-schedule)
+                                  (lambda (arg &optional time)
+                                    (setq calls (1+ calls))
+                                    (if (= calls 2)
+                                        (error "Synthetic schedule failure")
+                                      (funcall original arg time)))))
+                         (org-other-agenda-schedule-set-here))))
+                  (should (string-match-p "Scheduled 1; failed 1" report)))
+                (should (= 2 calls))
+                (should (= 1 (length (org-other-agenda--marked-headings))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-invalid-mark-blocks-bulk-and-survives ()
+  "An invalid source is rejected before native bulk and remains marked."
+  (let ((file (make-temp-file "org-other-agenda-invalid-mark-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* TODO Vanishing heading\n"
+                    "  SCHEDULED: <2026-08-20 Thu>\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'week)
+              (with-current-buffer view
+                (should (org-other-agenda-test--goto-rendered-entry
+                         view "Vanishing heading"))
+                (org-other-agenda-mark)
+                (let* ((marked (org-other-agenda--marked-headings))
+                       (source (marker-buffer (car marked))))
+                  (kill-buffer source)
+                  (should-error (org-other-agenda-bulk-action)
+                                :type 'user-error)
+                  (should (eq marked
+                              (org-other-agenda--marked-headings))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-cross-panel-rectangle-is-rejected ()
+  "A rectangle cannot cross panels and rejection preserves its anchor."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view)))
+      (org-other-agenda-test--select-tab view 'week)
+      (with-current-buffer view
+        (should (org-other-agenda-test--goto-rendered-entry
+                 view "Monday standup"))
+        (org-other-agenda-mark)
+        (let ((anchor (plist-get textui-state :rectangle-anchor)))
+          (org-other-agenda-test--select-tab view 'day)
+          (goto-char (point-min))
+          (let (slot-position)
+            (while (and (< (point) (point-max)) (null slot-position))
+              (when (eq (car-safe
+                         (get-text-property
+                          (point) 'org-other-agenda-object))
+                        'ooa-slot)
+                (setq slot-position (point)))
+              (forward-char 1))
+            (should slot-position)
+            (goto-char slot-position)
+            (should-error (org-other-agenda-mark) :type 'user-error)
+            (should (equal anchor
+                           (plist-get textui-state :rectangle-anchor)))
+            (should (= 1 (length
+                          (org-other-agenda--marked-headings))))))))))
+
+(ert-deftest org-other-agenda-test-native-persistent-bulk-keeps-marks ()
+  "Successful native bulk retains package marks when persistence is enabled."
+  (let ((file (make-temp-file "org-other-agenda-persistent-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* TODO Keep the mark\n"
+                    "  SCHEDULED: <2026-08-20 Thu>\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view))
+                  (org-agenda-persistent-marks t))
+              (org-other-agenda-test--select-tab view 'week)
+              (with-current-buffer view
+                (should (org-other-agenda-test--goto-rendered-entry
+                         view "Keep the mark"))
+                (org-other-agenda-mark)
+                (cl-letf (((symbol-function 'read-char-exclusive)
+                           (lambda (&rest _arguments) ?t))
+                          ((symbol-function 'completing-read)
+                           (lambda (&rest _arguments) "DONE")))
+                  (org-other-agenda-bulk-action))
+                (should (= 1 (length
+                              (org-other-agenda--marked-headings))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
 
 ;;; org-other-agenda-test.el ends here

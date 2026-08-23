@@ -124,6 +124,13 @@ then pads the cell to its declared `:width'."
   :action (lambda (w &optional _e)
             (textui-set-state (current-buffer) :date (widget-get w :ca-abs))))
 
+(defun ooa-day--navigation-value (value &rest properties)
+  "Return a copy of VALUE carrying renderer-owned navigation PROPERTIES."
+  (let ((value (copy-sequence (or value ""))))
+    (when (> (length value) 0)
+      (add-text-properties 0 (length value) properties value))
+    value))
+
 (defun ooa-day--stripe (kind)
   "Return a one-character colored stripe for `KIND'."
   (propertize " " 'face (cond ((eq kind 'life) 'ooa-stripe-life)
@@ -148,7 +155,11 @@ one."
               (list 'org-other-agenda-object (cons 'org-heading hd))))
         (when keymap
           (setq properties (append properties (list 'keymap keymap))))
-        (add-text-properties 0 (length value) properties value)))
+        (add-text-properties 0 (length value) properties value)
+        (when (and (fboundp 'org-other-agenda--heading-marked-p)
+                   (org-other-agenda--heading-marked-p hd))
+          (add-face-text-property 0 (length value)
+                                  'org-other-agenda-marked nil value))))
     value))
 
 
@@ -164,8 +175,13 @@ one."
          (start (- first lead))
          rows)
     (push (list :type 'ooa-text
-                :value (propertize (format "  %s %d" (calendar-month-name mo) yr)
-                                   'face '(:weight bold)))
+                :value (ooa-day--navigation-value
+                        (propertize (format "  %s %d" (calendar-month-name mo) yr)
+                                    'face '(:weight bold))
+                        'org-other-agenda-place '(day-calendar -1 -2)
+                        'org-other-agenda-context nil
+                        'org-other-agenda-node '(panel . "calendar")
+                        'org-other-agenda-parent t))
           rows)
     (push (list :type 'ooa-text
                 :value (concat "  " (mapconcat (lambda (d) (propertize (format "%-4s" d)
@@ -186,7 +202,24 @@ one."
                  (dot (concat (if (gethash abs busy) (propertize "·" 'face 'ooa-dot-sched) " ")
                               (if (gethash abs dead) (propertize "·" 'face 'ooa-dot-dead) " "))))
             (push (list :type 'ooa-date-cell
-                        :value (concat (propertize (format "%2d" day) 'face face) dot)
+                        :value (ooa-day--navigation-value
+                                (concat (propertize (format "%2d" day) 'face face) dot)
+                                'org-other-agenda-place
+                                (list 'day-calendar dw wk)
+                                'org-other-agenda-context
+                                (list '(day-calendar -1 -2))
+                                'org-other-agenda-node
+                                (cons 'date abs)
+                                'org-other-agenda-object
+                                (cons 'ooa-day abs)
+                                'keymap
+                                (and (boundp 'org-other-agenda-day-map)
+                                     (make-composed-keymap
+                                      (list
+                                       (symbol-value
+                                        'org-other-agenda-day-map)
+                                       (symbol-value
+                                        'org-other-agenda-view-map)))))
                         :ca-abs abs
                         :layout (list :focus-id (list 'cal abs)))
                   cells)))
@@ -212,22 +245,27 @@ blank, while exact-hour hairlines still span the full grid to preserve its grid
 structure."
   :type 'integer :group 'convenience)
 
-(defun ooa-day--timeblock (blocks width h0 h1 slot)
+(defun ooa-day--timeblock (blocks width h0 h1 slot &optional day)
   "Render `BLOCKS' between `H0' and `H1' using `SLOT' minute increments.
 
 `WIDTH' is the available width.
 
 Each block is a property list containing `:title', `:start', `:end',
-`:kind', `:lane', and `:nlanes'; all times are measured in minutes."
+`:kind', `:lane', and `:nlanes'; all times are measured in minutes.  Optional
+DAY is the absolute date carried by slot and day nouns."
   (let* ((labw 7)
          (avail (max 20 (- width labw 2)))
-         (nlanes (max 1 (apply #'max 1 (mapcar (lambda (b) (plist-get b :nlanes)) blocks))))
+         (nlanes
+          (max 1 (apply #'max 1
+                        (mapcar (lambda (b) (plist-get b :nlanes)) blocks))))
          ;; Cap `lw' at `ooa-day-max-block-width'. Leave surplus width blank
          ;; instead of letting one block span the entire region.
          (lw (min ooa-day-max-block-width (/ avail nlanes)))
          out)
-    (cl-loop for mins from (* h0 60) below (* h1 60) by slot do
-      (let* ((h (/ mins 60)) (m (% mins 60))
+    (cl-loop for mins from (* h0 60) below (* h1 60) by slot
+             for row from 0 do
+      (let* ((h (/ mins 60))
+             (m (% mins 60))
              ;; `labw' is 7: the exact-hour label "HH:MM " occupies six
              ;; cells, so pad it to 7. Otherwise exact-hour and half-hour rows
              ;; start one column apart.
@@ -237,12 +275,38 @@ Each block is a property list containing `:title', `:start', `:end',
              (cells
               (cl-loop for i from 0 below nlanes collect
                 (let ((b (cl-find-if
-                          (lambda (x) (and (= (plist-get x :lane) i)
-                                           (<= (plist-get x :start) mins)
-                                           (< mins (plist-get x :end))))
+                          (lambda (x)
+                            (and (= (plist-get x :lane) i)
+                                 (<= (plist-get x :start) mins)
+                                 (< mins (plist-get x :end))))
                           blocks)))
                   (if (null b)
-                      (make-string lw ?\s)
+                      (let ((value (make-string lw ?\s)))
+                        (if day
+                            (ooa-day--navigation-value
+                             value
+                             'org-other-agenda-place (list 'day-timeblock i row)
+                             'org-other-agenda-context
+                             (list '(day-timeblock -1 -2))
+                             'org-other-agenda-node
+                             (list 'time-cell mins (+ mins slot))
+                             'org-other-agenda-object
+                             (list 'ooa-slot day mins (+ mins slot))
+                             'org-other-agenda-targets
+                             (list (cons 'ooa-day day))
+                             'keymap
+                             (and (boundp 'org-other-agenda-slot-map)
+                                  (make-composed-keymap
+                                   (list
+                                    (symbol-value 'org-other-agenda-slot-map)
+                                    (symbol-value 'org-other-agenda-view-map)))))
+                          (ooa-day--navigation-value
+                           value
+                           'org-other-agenda-place (list 'day-timeblock i row)
+                           'org-other-agenda-context
+                           (list '(day-timeblock -1 -2))
+                           'org-other-agenda-node
+                           (list 'time-cell mins (+ mins slot)))))
                     (let* ((kind (plist-get b :kind))
                            (top (= mins (plist-get b :start)))
                            (body
@@ -252,24 +316,59 @@ Each block is a property list containing `:title', `:start', `:end',
                              ((and top (>= lw 22))
                               (propertize
                                (format "%02d:%02d–%02d:%02d"
-                                       (/ (plist-get b :start) 60) (% (plist-get b :start) 60)
-                                       (/ (plist-get b :end) 60) (% (plist-get b :end) 60))
+                                       (/ (plist-get b :start) 60)
+                                       (% (plist-get b :start) 60)
+                                       (/ (plist-get b :end) 60)
+                                       (% (plist-get b :end) 60))
                                'face 'ooa-blk-time))
-                             (top (truncate-string-to-width (plist-get b :title) (- lw 3) 0 ?\s))
-                             ((and (>= lw 22) (= mins (+ (plist-get b :start) slot)))
-                              (truncate-string-to-width (plist-get b :title) (- lw 3) 0 ?\s))
+                             (top
+                              (truncate-string-to-width
+                               (plist-get b :title) (- lw 3) 0 ?\s))
+                             ((and (>= lw 22)
+                                   (= mins (+ (plist-get b :start) slot)))
+                              (truncate-string-to-width
+                               (plist-get b :title) (- lw 3) 0 ?\s))
                              (t ""))))
-                      (ooa-day--object-value
-                       (concat (ooa-day--stripe kind)
+                      (let ((value
+                             (ooa-day--object-value
+                              (concat
+                               (ooa-day--stripe kind)
                                (propertize
-                                (concat " " (truncate-string-to-width body (- lw 2) 0 ?\s))
+                                (concat " "
+                                        (truncate-string-to-width
+                                         body (- lw 2) 0 ?\s))
                                 'face (ooa-day--blkface kind)))
-                       (plist-get b :hd)))))))
+                              (plist-get b :hd))))
+                        (if day
+                            (ooa-day--navigation-value
+                             value
+                             'org-other-agenda-place (list 'day-timeblock i row)
+                             'org-other-agenda-context
+                             (list '(day-timeblock -1 -2))
+                             'org-other-agenda-node
+                             (cons 'heading (plist-get b :title))
+                             'org-other-agenda-occurrence
+                             (plist-get b :occurrence)
+                             'org-other-agenda-targets
+                             (list (list 'ooa-slot day mins (+ mins slot))
+                                   (cons 'ooa-day day)))
+                          (ooa-day--navigation-value
+                           value
+                           'org-other-agenda-place (list 'day-timeblock i row)
+                           'org-other-agenda-context
+                           (list '(day-timeblock -1 -2))
+                           'org-other-agenda-node
+                           (cons 'heading (plist-get b :title))
+                           'org-other-agenda-occurrence
+                           (plist-get b :occurrence)))))))))
              (line (concat "  " label (mapconcat #'identity cells ""))))
         ;; Extend the hairline across the full grid width; otherwise the grid
         ;; pattern stops halfway after the block-width cap.
         (when (< (string-width line) (+ 2 avail))
-          (setq line (concat line (make-string (- (+ 2 avail) (string-width line)) ?\s))))
+          (setq line
+                (concat line
+                        (make-string
+                         (- (+ 2 avail) (string-width line)) ?\s))))
         ;; At exact hours, layer the hairline with `add-face-text-property'
         ;; and `APPEND' set to t. Using `propertize' directly would overwrite
         ;; each block's background.
@@ -325,7 +424,7 @@ alignment padding."
 Org Agenda splits each multi-day task into one entry per day.  The `type'
 field is \"block\", and `extra' has the form \"(N/M): \".  Use those fields to
 infer the absolute start and end dates."
-  (let (seen out)
+  (let (out)
     (dolist (e entries)
       (when (and (equal (plist-get e :etype) "block")
                  (plist-get e :extra)
@@ -333,15 +432,20 @@ infer the absolute start and end dates."
         (let* ((n (string-to-number (match-string 1 (plist-get e :extra))))
                (m (string-to-number (match-string 2 (plist-get e :extra))))
                (hd (plist-get e :hd))
-               (day (plist-get e :dayabs)))
-          (unless (member hd seen)
-            (push hd seen)
+               (day (plist-get e :dayabs))
+               (span (cl-find hd out :key (lambda (candidate)
+                                            (plist-get candidate :hd))
+                              :test #'equal)))
+          (if span
+              (plist-put span :occurrences
+                         (append (plist-get span :occurrences) (list e)))
             (let ((tags (plist-get e :tags)))
               (push (list :title (ooa-day--strip (plist-get e :txt)
-                                               (plist-get e :todo))
+                                                 (plist-get e :todo))
                           :start (- day (1- n)) :end (+ (- day (1- n)) (1- m))
                           :total m
                           :hd hd
+                          :occurrences (list e)
                           :kind (cond ((member "travel" tags) 'travel)
                                       ((member "learn" tags) 'learn)
                                       (t 'work)))
@@ -371,7 +475,8 @@ infer the absolute start and end dates."
             (setq done t))
           (setq i (1+ i)))
         (unless done (setq lanes (append lanes (list (list sp)))))))
-    (dolist (lane lanes)
+    (cl-loop for lane in lanes
+             for lane-index from 0 do
       (let ((line (make-string (+ labw (* 7 colw)) ?\s)))
         (dolist (sp lane)
           (let* ((s (max 0 (- (plist-get sp :start) mon)))
@@ -388,6 +493,34 @@ infer the absolute start and end dates."
             (add-face-text-property 0 (length txt)
                                     (ooa-day--barface (plist-get sp :kind)) nil txt)
             (setq txt (ooa-day--object-value txt (plist-get sp :hd)))
+            (dotimes (day (1+ (- e s)))
+              (let ((beg (* day colw))
+                    (end (min (length txt) (* (1+ day) colw)))
+                    (abs (+ mon s day)))
+                (when (< beg end)
+                  (let* ((entry
+                          (cl-find abs (plist-get sp :occurrences)
+                                   :key (lambda (candidate)
+                                          (plist-get candidate :dayabs))))
+                         (occurrence
+                          (and entry
+                               (list :hd (plist-get entry :hd)
+                                     :org-marker (plist-get entry :org-marker)
+                                     :day (plist-get entry :dayabs)
+                                     :type (plist-get entry :etype)
+                                     :agenda-type (plist-get entry :type)))))
+                    (add-text-properties
+                     beg end
+                     (list 'org-other-agenda-place
+                           (list 'week-bars (+ s day) lane-index)
+                           'org-other-agenda-context
+                           (list '(week-bars -1 -2))
+                           'org-other-agenda-node
+                           (cons 'heading (plist-get sp :title))
+                           'org-other-agenda-occurrence occurrence
+                           'org-other-agenda-targets
+                           (list (cons 'ooa-day abs)))
+                     txt)))))
             (setq line (concat (substring line 0 x) txt
                                (substring line (min (length line) (+ x w)))))))
         (push (list :type 'ooa-text :value line) rows)))

@@ -72,22 +72,56 @@ is in Agenda, everything without one is in Someday.
 | Group | Key | Action |
 |---|---|---|
 | Move | `n` `p` | next / previous entry row |
-| Move | `u` | move to the nearest date or section header |
+| Move | arrows | move among structural neighbors in the current panel |
+| Move | `M-n` `M-p` | first object in the next / previous panel |
+| Move | `u` | move to the current object's container, then panel title |
 | Move | `TAB` / `S-TAB` | move between focusable widgets |
-| Move | `[` `]` | previous / next day |
+| View | `[` `]` | previous / next selected day |
 | Move | `C-v` `M-v` | scroll a long list |
+| Change the entry occurrence at point | `S-<left>` `S-<right>` | move its native Org timestamp earlier / later |
+| Change the heading at point | `S-<up>` `S-<down>` | raise / lower its native Org priority |
 | Act on the entry at point | `t` `s` `d` `,` `:` | TODO state, schedule, deadline, priority, tags |
 | Act on the entry at point | `RET` or mouse-1 | visit the Org entry |
 | Act on the entry at point | `embark-act` | open the Embark menu; the full `embark-org-heading-map` is available |
+| Select | `m` | mark one heading, a whole day, or complete a structural rectangle |
+| Select | `U` | clear all heading marks and the pending rectangle anchor |
+| Act on the marked set | `B` | run native `org-agenda-bulk-action` |
+| Act on the marked set at a day / empty slot | `s` | schedule every marked heading on that date / at that time |
 | View | `1`–`6` | switch tab |
 | View | `/` | search |
 | View | `\` | clear the search |
 | View | `g` | refresh |
 | View | `q` | quit |
 
-The editing keys forward to the native `org-agenda-*` command for the entry at
-point, so your TODO sequences, logging and hooks all apply. The month calendar,
-the tab bar, the overflow markers and the overdue fold are clickable.
+The editing keys forward to native `org-agenda-*` commands, so your TODO
+sequences, logging and hooks all apply. Bare arrows move point through the
+renderer's stable `(panel column row)` coordinates; they do not edit Org.
+`C-n`, `C-p`, `C-f` and `C-b` retain their normal Emacs meanings. The month
+calendar, the tab bar, the overflow markers and the overdue fold are clickable.
+
+### Heading sets and rectangles
+
+There is one marked-heading set, shared by every page. A heading that appears
+more than once is stored once and highlighted at every visible occurrence.
+Press `m` on a heading to toggle it and leave a rectangle anchor. Move with the
+arrows and press `m` at another cell in the same panel to add the closed
+column/row rectangle; press `m` again without moving to end the gesture while
+keeping the single mark. Pressing `m` on a day heading toggles every heading on
+that date. `U` clears the set without changing Org.
+
+`B` resolves the set back to the current hidden agenda and invokes Org's own
+bulk prompt. It therefore has native bulk failure semantics: processing stops
+at the first error, completed changes are not rolled back, and the package
+marks remain so the set is still actionable. On success, marks follow
+`org-agenda-persistent-marks`.
+
+An empty Today time cell is an `ooa-slot`; calendar cells and Week/Agenda date
+headers are `ooa-day` objects. Their `s` action schedules every marked heading
+through native `org-agenda-schedule`. Slot scheduling uses the slot's start
+time, while day scheduling writes a date without a time. Unlike `B`, this path
+continues after an individual failure, removes successful headings from the
+set, retains failures, and reports both counts at the end. Use `embark-act` to
+discover the nested heading → slot → day actions on occupied cells.
 
 ## Searching
 

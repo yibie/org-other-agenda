@@ -48,6 +48,9 @@
   "Non-nil when entry movement already scrolled the current viewport.")
 (defvar org-other-agenda-entry-map)
 (defvar org-other-agenda-entry-cell-map)
+(defvar org-other-agenda-day-map)
+(defvar org-other-agenda-slot-map)
+(defvar org-other-agenda-view-map)
 
 ;;; ---------------------------------------------------------------- Semantic extraction
 
@@ -136,7 +139,8 @@ When `BUFFER' is nil, use the ordinary base shadow buffer."
           (setq day (buffer-substring-no-properties
                      (line-beginning-position) (line-end-position))))
         (when (org-get-at-bol 'org-marker)
-          (let* ((txt (or (org-get-at-bol 'txt) ""))
+          (let* ((org-marker (org-get-at-bol 'org-marker))
+                 (txt (or (org-get-at-bol 'txt) ""))
                  (hd  (org-get-at-bol 'org-hd-marker))
                  (todo (or (org-get-at-bol 'todo-state)
                            (org-other-agenda--todo-state-at-marker hd)))
@@ -144,6 +148,7 @@ When `BUFFER' is nil, use the ordinary base shadow buffer."
                        (line-beginning-position) (line-end-position))))
             (push (list :txt (string-trim txt)
                         :hd hd
+                        :org-marker org-marker
                         :type (org-get-at-bol 'org-agenda-type)
                         :todo todo
                         :prio (org-get-at-bol 'priority)
@@ -178,6 +183,94 @@ The implementation lives in `org-other-agenda-day', which this file requires,
 so both renderers share one definition of the `org-other-agenda-object' and
 `keymap' properties.  A nil keymap uses the entry-cell map for plain text
 cells; button widgets pass the entry map explicitly to preserve widget RET.")
+
+(defun org-other-agenda--panel-place (panel)
+  "Return the structural place reserved for PANEL's visible title."
+  (list panel -1 -2))
+
+(defun org-other-agenda--occurrence (entry)
+  "Return source provenance for rendered ENTRY."
+  (list :hd (plist-get entry :hd)
+        :org-marker (plist-get entry :org-marker)
+        :day (plist-get entry :dayabs)
+        :type (plist-get entry :etype)
+        :agenda-type (plist-get entry :type)))
+
+(defun org-other-agenda--navigation-value
+    (value place context node &optional object keymap occurrence)
+  "Annotate VALUE with renderer-owned structural navigation metadata.
+
+PLACE is `(PANEL COL ROW)', CONTEXT lists parent places from inner to outer,
+and NODE names a non-action structural node.  OBJECT, KEYMAP and OCCURRENCE
+are optional entry semantics."
+  (let ((value (ooa-day--navigation-value
+                value
+                'org-other-agenda-place place
+                'org-other-agenda-context context
+                'org-other-agenda-node node
+                'org-other-agenda-occurrence occurrence)))
+    (when object
+      (let ((direct-map
+             (if (and keymap
+                      (memq keymap (list org-other-agenda-day-map
+                                        org-other-agenda-slot-map)))
+                 (make-composed-keymap
+                  (list keymap org-other-agenda-view-map))
+               keymap)))
+        (setq value (copy-sequence value))
+        (add-text-properties
+         0 (length value)
+         (append (list 'org-other-agenda-object object)
+                 (and direct-map (list 'keymap direct-map)))
+         value)))
+    value))
+
+(defun org-other-agenda--entry-value
+    (value entry place context &optional keymap targets)
+  "Annotate VALUE as an ENTRY occurrence at PLACE within CONTEXT.
+
+Optional KEYMAP supplies direct entry actions.  TARGETS lists outer nouns."
+  (let ((value
+         (org-other-agenda--navigation-value
+          value place context
+          (cons 'heading (org-other-agenda--clean-title entry))
+          (cons 'org-heading (plist-get entry :hd))
+          (or keymap
+              (and (boundp 'org-other-agenda-entry-cell-map)
+                   org-other-agenda-entry-cell-map))
+          (org-other-agenda--occurrence entry))))
+    (when targets
+      (add-text-properties
+       0 (length value) (list 'org-other-agenda-targets targets) value))
+    (when (org-other-agenda--heading-marked-p (plist-get entry :hd))
+      (add-face-text-property 0 (length value)
+                              'org-other-agenda-marked nil value))
+    value))
+
+(defun org-other-agenda--panel-value (value panel &optional label)
+  "Annotate VALUE as the visible title of PANEL, named by optional LABEL."
+  (let ((value
+         (org-other-agenda--navigation-value
+          value (org-other-agenda--panel-place panel) nil
+          (cons 'panel (or label (symbol-name panel))))))
+    (add-text-properties 0 (length value) '(org-other-agenda-parent t) value)
+    value))
+
+(defun org-other-agenda--container-value
+    (value place panel &optional label object keymap targets)
+  "Annotate VALUE as a container at PLACE inside PANEL.
+
+Optional LABEL names the node, OBJECT supplies executable noun data, KEYMAP
+provides direct actions, and TARGETS lists outer nouns."
+  (let ((value
+         (org-other-agenda--navigation-value
+          value place (list (org-other-agenda--panel-place panel))
+          (cons 'container (or label (symbol-name panel))) object keymap)))
+    (when targets
+      (add-text-properties
+       0 (length value) (list 'org-other-agenda-targets targets) value))
+    (add-text-properties 0 (length value) '(org-other-agenda-parent t) value)
+    value))
 
 (defun org-other-agenda--parent-value (value)
   "Mark `VALUE' as a date or section header for parent movement."
@@ -229,9 +322,11 @@ agenda, tags, and search.  TextUI requires each `:focus-id' to be unique
 within a frame, so the focus ID must include the block scope.  `ORDINAL'
 disambiguates repeated rows from the same block."
   (list :type 'org-other-agenda-row
-        :value (org-other-agenda--object-value
+        :value (org-other-agenda--entry-value
                 (org-other-agenda--row e title-width tag-width todo-width)
-                (plist-get e :hd)
+                e (list (or scope (plist-get e :type)) 0 (or ordinal 0))
+                (list (org-other-agenda--panel-place
+                       (or scope (plist-get e :type))))
                 org-other-agenda-entry-map)
         :cool-hd (plist-get e :hd)
         :layout (list :focus-id (list (or scope (plist-get e :type))
@@ -264,6 +359,16 @@ disambiguates repeated rows from the same block."
 (defface org-other-agenda-overdue
   '((t (:foreground "#ffc777")))
   "An overdue group heading.")
+(defface org-other-agenda-current-object
+  '((t (:inherit highlight)))
+  "Non-metric-changing feedback for the structural noun at point.")
+(defface org-other-agenda-marked
+  '((((background dark)) (:underline (:color "#ffc777" :style wave)))
+    (t (:underline (:color "#9C6212" :style wave))))
+  "Non-metric-changing feedback for headings in the marked set.")
+
+(defvar-local org-other-agenda--current-object-overlays nil
+  "Overlays highlighting the complete structural noun at point.")
 
 (defun org-other-agenda--prio-cell (e)
   "Return the priority cell for `E'.
@@ -382,70 +487,81 @@ their cell counts.  Keep this implementation for regression comparisons."
             (truncate-string-to-width title title-width 0 ?\s)
             (org-other-agenda--tags-cell e tag-width))))
 
-(defun org-other-agenda--cell (value width &optional face hd)
+(defun org-other-agenda--cell
+    (value width &optional face entry place context targets)
   "Build a fixed-width cell from `VALUE'.
 
-`WIDTH' sets the cell width, optional `FACE' supplies its face, and `HD'
-adds the rendered Org-heading object for the row."
+`WIDTH' sets the cell width and optional `FACE' supplies its face.  ENTRY,
+PLACE and CONTEXT add one rendered heading occurrence; TARGETS lists its
+outer nouns."
   (let ((value (if face (propertize value 'face face) value)))
     (list :type 'ooa-text
-          :value (if hd
-                     (org-other-agenda--object-value
-                      value hd org-other-agenda-entry-cell-map)
+          :value (if entry
+                     (org-other-agenda--entry-value
+                      value entry place context
+                      org-other-agenda-entry-cell-map targets)
                    value)
           :layout (list :width width))))
 
-(defun org-other-agenda--flex-row (e scope todo-width &optional ordinal)
+(defun org-other-agenda--flex-row
+    (e scope todo-width &optional ordinal panel col context targets)
   "Render `E' as a flex row with a clickable title cell.
 
 TextUI aligns the columns.  `SCOPE' disambiguates the row's `:focus-id', and
 `TODO-WIDTH' fixes the state column width.  `ORDINAL', when supplied, is the
 entry's position in the complete source list; it keeps repeated Org rows
-focusable even when they share a heading marker and date."
+focusable even when they share a heading marker and date.  Optional PANEL,
+COL and CONTEXT override the default structural placement; TARGETS lists
+outer nouns."
   (let* ((title (org-other-agenda--clean-title e))
          (tags (plist-get e :tags))
-         (tagstr (if tags (mapconcat (lambda (tg) (concat "#" tg)) tags " ") "")))
+         (tagstr (if tags (mapconcat (lambda (tg) (concat "#" tg)) tags " ") ""))
+         (panel (or panel scope))
+         (place (list panel (or col 0) (or ordinal 0)))
+         (context (or context (list (org-other-agenda--panel-place panel)))))
     (list :type :flex :direction :row :gap 1
           :children
           (list
            (org-other-agenda--cell (org-other-agenda--prio-cell e) 3
-                                   nil (plist-get e :hd))
+                                   nil e place context targets)
            (org-other-agenda--cell (org-other-agenda--state-cell e todo-width)
-                                   todo-width nil (plist-get e :hd))
+                                   todo-width nil e place context targets)
            (org-other-agenda--cell (org-other-agenda--condition-cell e) 1
-                                   nil (plist-get e :hd))
+                                   nil e place context targets)
            (org-other-agenda--cell (org-other-agenda--time-cell e) 5
-                                   nil (plist-get e :hd))
+                                   nil e place context targets)
            (list :type 'org-other-agenda-row
-                 :value (org-other-agenda--object-value
+                 :value (org-other-agenda--entry-value
                          (if (plist-get e :blocked)
                              (propertize title 'face 'org-other-agenda-blocked)
                            title)
-                         (plist-get e :hd)
-                         org-other-agenda-entry-map)
+                         e place context
+                         org-other-agenda-entry-map targets)
                  :cool-hd (plist-get e :hd)
                  :layout (list :grow 1
                                :focus-id (list scope (plist-get e :hd)
                                                (plist-get e :day)
                                                (or ordinal 0))))
            (org-other-agenda--cell tagstr 18 'org-other-agenda-tag
-                                   (plist-get e :hd))))))
+                                   e place context targets)))))
 
 (defun org-other-agenda--embark-object-at-point ()
   "Return the rendered Org-heading object at point or on the current line."
-  (or (get-text-property (point) 'org-other-agenda-object)
-      (and (> (point) (point-min))
-           (get-text-property (1- (point)) 'org-other-agenda-object))
-      (save-excursion
-        (goto-char (line-beginning-position))
-        (let ((end (line-end-position)))
-          (catch 'object
-            (while (< (point) end)
-              (when-let* ((object (get-text-property
-                                   (point) 'org-other-agenda-object)))
-                (throw 'object object))
-              (forward-char 1))
-            nil)))))
+  (if-let* ((position (org-other-agenda--navigation-position)))
+      (get-text-property position 'org-other-agenda-object)
+    (or (get-text-property (point) 'org-other-agenda-object)
+        (and (> (point) (point-min))
+             (get-text-property (1- (point)) 'org-other-agenda-object))
+        (save-excursion
+          (goto-char (line-beginning-position))
+          (let ((end (line-end-position)))
+            (catch 'object
+              (while (< (point) end)
+                (when-let* ((object (get-text-property
+                                     (point) 'org-other-agenda-object)))
+                  (throw 'object object))
+                (forward-char 1))
+              nil))))))
 
 (defun org-other-agenda--embark-title (hd)
   "Return the cleaned rendered title for Org heading marker `HD'."
@@ -476,6 +592,55 @@ which is the location contract used by `embark-org-heading-map'."
           (when (stringp title)
             `(org-heading ,(propertize title 'org-marker hd)
                           ,(line-beginning-position) . ,(line-end-position))))))))
+
+(defun org-other-agenda--noun-object-at-point (type)
+  "Return the innermost or outer noun object of TYPE at point."
+  (when-let* ((position (org-other-agenda--navigation-position)))
+    (let ((object (get-text-property position 'org-other-agenda-object))
+          (targets (get-text-property position 'org-other-agenda-targets)))
+      (cl-find type (cons object targets) :key #'car-safe))))
+
+(defun org-other-agenda--embark-noun-target (type)
+  "Return an Embark target of TYPE from renderer-owned noun metadata."
+  (when (and org-other-agenda--view
+             (derived-mode-p 'textui-mode))
+    (when-let* ((object (org-other-agenda--noun-object-at-point type)))
+      (let ((target
+             (pcase type
+               ('ooa-day
+                (let ((day (cdr object)))
+                  (propertize
+                   (calendar-date-string
+                    (calendar-gregorian-from-absolute day))
+                   'ooa-day day)))
+               ('ooa-slot
+                (pcase-let ((`(,_ ,day ,start ,end) object))
+                  (propertize
+                   (format "%s %02d:%02d–%02d:%02d"
+                           (calendar-date-string
+                            (calendar-gregorian-from-absolute day))
+                           (/ start 60) (% start 60)
+                           (/ end 60) (% end 60))
+                   'ooa-slot (cdr object)))))))
+        (and target
+             (cons type
+                   (cons target
+                         (cons (line-beginning-position)
+                               (line-end-position)))))))))
+
+(defun org-other-agenda-embark-slot-target ()
+  "Return the Today time slot target at point, including occupied cells."
+  (org-other-agenda--embark-noun-target 'ooa-slot))
+
+(defun org-other-agenda-embark-day-target ()
+  "Return the calendar day containing the structural noun at point."
+  (org-other-agenda--embark-noun-target 'ooa-day))
+
+(defun org-other-agenda-embark-targets ()
+  "Return nested board targets in heading, slot, then day order."
+  (delq nil (list (org-other-agenda-embark-target)
+                  (org-other-agenda-embark-slot-target)
+                  (org-other-agenda-embark-day-target))))
 
 (defconst org-other-agenda--slot 15
   "The number of minutes represented by one time-block row.")
@@ -673,6 +838,8 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
              (tags (plist-get e :tags)))
         (push (list :title (org-other-agenda--clean-title e)
                     :hd (plist-get e :hd)
+                    :entry e
+                    :occurrence (org-other-agenda--occurrence e)
                     :start st :end (+ st du)
                     :kind (cond ((member "life" tags) 'life)
                                 ((member "habit" tags) 'habit)
@@ -722,7 +889,7 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
            ;; while leaving the page half empty.
            (calendar-elements (ooa-day--month-grid sel today busy dead))
            (timeblock-elements
-            (ooa-day--timeblock blocks tbw 8 18 30))
+            (ooa-day--timeblock blocks tbw 8 18 30 sel))
            (fixed-lines (+ 2           ; tab bar and query bar
                            (max (length calendar-elements)
                                 (+ 1 (length timeblock-elements)
@@ -734,7 +901,9 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
              (org-other-agenda--viewport-offset 'day)
              'day fixed-lines
              (lambda (e ordinal)
-               (org-other-agenda--flex-row e 'dayrest todo-width ordinal))))
+               (org-other-agenda--flex-row
+                e 'dayrest todo-width ordinal 'day-other 0 nil
+                (list (cons 'ooa-day sel))))))
            (g (calendar-gregorian-from-absolute sel)))
       (list
        (list :type :flex :direction :row :gap 2
@@ -748,23 +917,29 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
                     :children
                     (append
                      (list (list :type 'ooa-text
-                                 :value (org-other-agenda--parent-value
-                                         (concat
+                                :value (org-other-agenda--panel-value
+                                        (concat
                                           (propertize (format "%s %d " (calendar-month-name (nth 0 g) t) (nth 1 g))
                                                       'face 'ooa-day-title)
                                           (propertize
                                            (format " %d blocks · %d todos"
                                                    (length blocks) (length untimed))
-                                           'face 'ooa-day-meta)))))
+                                                   'face 'ooa-day-meta))
+                                        'day-timeblock "time blocks")))
                      timeblock-elements
                      (when over
-                       (cons (list :type 'ooa-text :value " ")
+                       (cons (list :type 'ooa-text
+                                   :value (org-other-agenda--panel-value
+                                           (propertize
+                                            (format "  Overflow (%d)" (length over))
+                                            'face 'ooa-day-meta)
+                                           'day-overflow "overflow"))
                              (cl-loop for x in over for i from 0 collect
                                       (list :type 'org-other-agenda-pin
                                             :cool-hd (plist-get x :hd)
                                             :layout (list :focus-id
                                                           (list 'pin (plist-get x :hd)))
-                                            :value (org-other-agenda--object-value
+                                            :value (org-other-agenda--entry-value
                                                     (concat
                                                      "  "
                                                      (propertize
@@ -779,15 +954,19 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
                                                      (plist-get x :title)
                                                      (propertize "  click to take main lane"
                                                                  'face 'ooa-day-meta))
-                                                    (plist-get x :hd)
+                                                    (plist-get x :entry)
+                                                    (list 'day-overflow 0 i)
+                                                    (list (org-other-agenda--panel-place
+                                                           'day-overflow))
                                                     org-other-agenda-entry-map)))))))))
        (list :type 'ooa-text :value " ")
        (list :type 'ooa-text
-             :value (org-other-agenda--parent-value
+             :value (org-other-agenda--panel-value
                      (propertize
                       (format "  Other items today (%d)    ⊘ blocked · ▶ clocking · ◈ habit"
                               (length untimed))
-                      'face 'ooa-day-meta)))
+                      'face 'ooa-day-meta)
+                     'day-other "other items"))
        (list :type :flex :direction :column :gap 0
              :children (or other-elements
                            (list (list :type 'ooa-text :value " "))))))))
@@ -820,6 +999,20 @@ The page contains a day-list header, multi-day bars, and daily entries.
                    (list (list :type 'ooa-text
                                :value (propertize "  No multi-day tasks this week"
                                                   'face 'ooa-day-meta)))))
+         (day-items
+          (cl-loop for i from 0 below 7
+                   for abs = (+ mon i)
+                   collect
+                   (cl-remove-if-not
+                    (lambda (e)
+                      (and (equal (plist-get e :dayabs) abs)
+                           (not (equal (plist-get e :etype) "block"))))
+                    agenda)))
+         (fixed-lines (+ 6 (length bars)))
+         (week-offset
+          (org-other-agenda--clamp-viewport
+           'week (org-other-agenda--viewport-offset 'week) fixed-lines
+           (apply #'max 0 (mapcar #'length day-items))))
          (today (org-today))
          head)
     ;; Header.
@@ -831,15 +1024,22 @@ The page contains a day-list header, multi-day bars, and daily entries.
                    (format "%s %d" (nth i '("Mon" "Tue" "Wed" "Thu" "Fri" "Sat" "Sun"))
                            (nth 1 g))
                    colw 0 ?\s)))
-        (setq head (concat head
-                           (propertize txt 'face
-                                       (if (= abs today) 'ooa-wk-today 'ooa-wk-head))))))
+        (setq head
+              (concat
+               head
+               (org-other-agenda--container-value
+                (propertize txt 'face
+                            (if (= abs today) 'ooa-wk-today 'ooa-wk-head))
+                (list 'week-days i -1) 'week-days
+                (format "day %d" abs)
+                (cons 'ooa-day abs) org-other-agenda-day-map)))))
     (append
      (list (list :type 'ooa-text
-                 :value (org-other-agenda--parent-value
+                 :value (org-other-agenda--panel-value
                          (concat (propertize "  This week " 'face 'ooa-day-title)
                                  (propertize (format "· %d multi-day" (length spans))
-                                             'face 'ooa-day-meta))))
+                                             'face 'ooa-day-meta))
+                         'week-bars "multi-day bars"))
            (list :type 'ooa-text
                  :value (org-other-agenda--parent-value head))
            (list :type 'ooa-text
@@ -848,6 +1048,10 @@ The page contains a day-list header, multi-day bars, and daily entries.
                           (add-face-text-property 0 (length r) 'ooa-rule nil r) r)))
      bars
      (list (list :type 'ooa-text :value " "))
+     (list (list :type 'ooa-text
+                 :value (org-other-agenda--panel-value
+                         (propertize "  Daily items" 'face 'ooa-day-meta)
+                         'week-days "daily columns")))
      ;; Daily entries are arranged side by side by column.
      (list
       (list :type :flex :direction :row :gap 0
@@ -855,17 +1059,14 @@ The page contains a day-list header, multi-day bars, and daily entries.
             (cons (list :type 'ooa-text :value (make-string labw ?\s))
                   (cl-loop for i from 0 below 7 collect
                     (let* ((abs (+ mon i))
-                           (items (cl-remove-if-not
-                                   (lambda (e) (and (equal (plist-get e :dayabs) abs)
-                                                    (not (equal (plist-get e :etype) "block"))))
-                                   agenda)))
+                           (items (nth i day-items)))
                       (list :type :flex :direction :column :gap 0
                             :layout (list :width colw)
                             :children
                             (or (org-other-agenda--windowed
                                  items
-                                 (org-other-agenda--viewport-offset 'week)
-                                 'week (+ 5 (length bars))
+                                 week-offset
+                                 'week fixed-lines
                                  (lambda (e ordinal)
                                    (list :type 'org-other-agenda-row
                                          :value (let ((v (truncate-string-to-width
@@ -878,13 +1079,19 @@ The page contains a day-list header, multi-day bars, and daily entries.
                                                   (add-face-text-property
                                                    0 (length v)
                                                    (org-other-agenda--tag-face e) t v)
-                                                  (org-other-agenda--object-value
-                                                   v (plist-get e :hd)
-                                                   org-other-agenda-entry-map))
+                                                  (org-other-agenda--entry-value
+                                                   v e
+                                                   (list 'week-days i ordinal)
+                                                   (list (list 'week-days i -1)
+                                                         (org-other-agenda--panel-place
+                                                          'week-days))
+                                                   org-other-agenda-entry-map
+                                                   (list (cons 'ooa-day abs))))
                                          :cool-hd (plist-get e :hd)
                                          :layout (list :focus-id
                                                        (list 'wk (plist-get e :hd)
-                                                             abs ordinal)))))
+                                                             abs ordinal))))
+                                 t)
                                 (list (list :type 'ooa-text
                                             :value (make-string colw ?\s)))))))))))))
 
@@ -904,10 +1111,11 @@ The page contains a day-list header, multi-day bars, and daily entries.
   '((((background dark)) (:foreground "#D6A65C")) (t (:foreground "#9C6212")))
   "The query bar.")
 
-(defun org-other-agenda--query-bar (query kind n &optional parent)
+(defun org-other-agenda--query-bar (query kind n &optional parent panel)
   "Render the query bar for `QUERY' of `KIND' with `N' matches.
 
-When PARENT is non-nil, mark the bar as the section parent for query rows."
+When PARENT is non-nil, mark the bar as the section parent for query rows.
+When PANEL is non-nil, make the bar that panel's structural title."
   (let ((value
          (concat
           "  "
@@ -926,9 +1134,9 @@ When PARENT is non-nil, mark the bar as the section parent for query rows."
             (propertize "/ search text or #tag"
                         'face 'org-other-agenda-dim)))))
     (list :type 'ooa-text
-          :value (if parent
-                     (org-other-agenda--parent-value value)
-                   value))))
+          :value (cond (panel (org-other-agenda--panel-value value panel))
+                       (parent (org-other-agenda--parent-value value))
+                       (t value)))))
 
 (defun org-other-agenda--query-page (entries query kind todo-width)
   "Render query `ENTRIES' for `QUERY' of `KIND'.
@@ -1112,8 +1320,29 @@ entry list."
                     40)
                 (org-other-agenda--viewport-fixed-lines scope)))))
 
+(defun org-other-agenda--clamp-viewport (scope offset fixed-lines total)
+  "Clamp OFFSET once for a SCOPE panel containing TOTAL structural rows."
+  (let* ((page-size
+          (max 2 (- (or (org-other-agenda--window-height)
+                        (plist-get textui-state :viewport-page-size)
+                        40)
+                    fixed-lines)))
+         (visible-count (max 1 (1- page-size)))
+         (maximum (max 0 (- total visible-count)))
+         (start (max 0 (min maximum offset)))
+         (state (copy-sequence textui-state)))
+    (setq state
+          (plist-put state
+                     (org-other-agenda--viewport-key scope "offset") start))
+    (setq state
+          (plist-put state
+                     (org-other-agenda--viewport-key scope "page-size")
+                     page-size))
+    (setq textui-state state)
+    start))
+
 (defun org-other-agenda--windowed (elements offset scope fixed-lines
-                                            &optional producer)
+                                            &optional producer shared-offset)
   "Return the visible slice of `ELEMENTS' for viewport `SCOPE'.
 
 `OFFSET' is measured in elements, and `FIXED-LINES' reserves space for the
@@ -1122,8 +1351,11 @@ non-nil, call it only for visible elements; this keeps long entry lists from
 constructing invisible widgets.  The returned list ends with a position
 indicator, and the clamped offset and page size are written back to
 `textui-state'.  `PRODUCER', when supplied, receives each visible element and
-its absolute index in `ELEMENTS'."
-  (when elements
+its absolute index in `ELEMENTS'.  SHARED-OFFSET means OFFSET was clamped once
+for a multi-column panel; short columns then render empty instead of rewriting
+the shared viewport state."
+  (when (and elements
+             (or (not shared-offset) (< offset (length elements))))
     (let* ((total (length elements))
            (page-size
             (max 2 (- (or (org-other-agenda--window-height)
@@ -1132,7 +1364,8 @@ its absolute index in `ELEMENTS'."
                       fixed-lines)))
            (visible-count (max 1 (1- page-size)))
            (maximum (max 0 (- total visible-count)))
-           (start (max 0 (min maximum offset)))
+           (start (if shared-offset offset
+                    (max 0 (min maximum offset))))
            (end (min total (+ start visible-count)))
            (visible (cl-subseq elements start end))
            (visible
@@ -1149,12 +1382,13 @@ its absolute index in `ELEMENTS'."
                            (1+ start) end total)
                    'face 'org-other-agenda-dim)))
            (state (copy-sequence textui-state)))
-      (setq state (plist-put
-                   state (org-other-agenda--viewport-key scope "offset") start))
-      (setq state (plist-put
-                   state (org-other-agenda--viewport-key scope "page-size")
-                   page-size))
-      (setq textui-state state)
+      (unless shared-offset
+        (setq state (plist-put
+                     state (org-other-agenda--viewport-key scope "offset") start))
+        (setq state (plist-put
+                     state (org-other-agenda--viewport-key scope "page-size")
+                     page-size))
+        (setq textui-state state))
       (append visible (list indicator)))))
 
 (defun org-other-agenda--agenda-items (entries)
@@ -1179,7 +1413,7 @@ agenda even though only the visible slice becomes widgets."
         (dolist (e fresh)
           (unless (equal cur (plist-get e :day))
             (setq cur (plist-get e :day))
-            (push (list :kind 'header :day cur) out))
+            (push (list :kind 'header :day cur :dayabs (plist-get e :dayabs)) out))
           (push (list :kind 'entry :entry e :scope 'agenda) out))
         (when overdue
           (push (list :kind 'toggle :open open :count (length overdue)) out)
@@ -1192,34 +1426,58 @@ agenda even though only the visible slice becomes widgets."
                            :agenda-items-cache (list entries open items)))
           items)))))
 
-(defun org-other-agenda--agenda-item-element (item todo-width &optional ordinal)
+(defun org-other-agenda--agenda-item-element
+    (item todo-width &optional ordinal container-row)
   "Render one agenda viewport descriptor `ITEM'.
 
 `TODO-WIDTH' fixes the state-column width, and `ORDINAL' disambiguates
-repeated rows in the frame focus map."
+repeated rows in the frame focus map.  CONTAINER-ROW identifies its parent."
   (pcase (plist-get item :kind)
     ('header
      (list :type 'ooa-text
-           :value (org-other-agenda--parent-value
+           :value (org-other-agenda--container-value
                    (propertize
                     (format "── %s" (or (plist-get item :day) ""))
-                    'face 'org-other-agenda-day))))
+                   'face 'org-other-agenda-day)
+                   (list 'agenda 0 ordinal) 'agenda
+                   (or (plist-get item :day) "Agenda")
+                   (and (plist-get item :dayabs)
+                        (cons 'ooa-day (plist-get item :dayabs)))
+                   (and (plist-get item :dayabs)
+                        org-other-agenda-day-map))))
     ('entry
      (org-other-agenda--flex-row
       (plist-get item :entry)
       (plist-get item :scope)
-      todo-width ordinal))
+      todo-width ordinal 'agenda 0
+      (delq nil
+            (list (and container-row (list 'agenda 0 container-row))
+                  (org-other-agenda--panel-place 'agenda)))
+      (and (plist-get (plist-get item :entry) :dayabs)
+           (list (cons 'ooa-day
+                       (plist-get (plist-get item :entry) :dayabs))))))
     ('toggle
      (let ((open (plist-get item :open)))
        (list :type 'org-other-agenda-toggle
-             :value (propertize
-                     (format "%s %d overdue%s"
-                             (if open "▾" "▸")
-                             (plist-get item :count)
-                             (if open "" "  (click to expand)"))
-                     'face 'org-other-agenda-overdue)
+             :value (org-other-agenda--container-value
+                     (propertize
+                      (format "%s %d overdue%s"
+                              (if open "▾" "▸")
+                              (plist-get item :count)
+                              (if open "" "  (click to expand)"))
+                      'face 'org-other-agenda-overdue)
+                     (list 'agenda 0 ordinal) 'agenda "overdue")
              :cool-key :overdue-open
              :layout (list :focus-id '(toggle overdue)))))))
+
+(defun org-other-agenda--agenda-container-row (items ordinal)
+  "Return the nearest container row at or before ORDINAL in ITEMS."
+  (let ((index (min ordinal (1- (length items)))) found)
+    (while (and (>= index 0) (null found))
+      (when (memq (plist-get (nth index items) :kind) '(header toggle))
+        (setq found index))
+      (setq index (1- index)))
+    found))
 
 (defun org-other-agenda--agenda-viewport-parent (items offset)
   "Return a parent header for ITEMS when the viewport starts at OFFSET.
@@ -1230,14 +1488,20 @@ still has a parent to reach without making the off-screen rows part of the
 projection again."
   (when (> offset 0)
     (let* ((item (nth offset items))
-           (day (cl-loop for candidate in (nthcdr offset items)
-                         thereis (or (plist-get candidate :day)
-                                    (plist-get (plist-get candidate :entry)
-                                               :day)))))
+           (container-row
+            (org-other-agenda--agenda-container-row items offset))
+           (container (and container-row (nth container-row items)))
+           (day (or (plist-get container :day)
+                    (and (eq (plist-get container :kind) 'toggle) "Overdue")
+                    "Agenda"))
+           (dayabs (plist-get container :dayabs)))
       (unless (eq (plist-get item :kind) 'header)
         (list :type 'ooa-text
-              :value (org-other-agenda--parent-value
-                      (format "── %s" (or day "Agenda"))))))))
+              :value (org-other-agenda--container-value
+                      (format "── %s" day)
+                      (list 'agenda 0 container-row) 'agenda day
+                      (and dayabs (cons 'ooa-day dayabs))
+                      (and dayabs org-other-agenda-day-map)))))))
 
 (defun org-other-agenda--agenda-page-size ()
   "Return the current Agenda viewport page size."
@@ -1257,12 +1521,19 @@ width."
       (list (list :type :flex :direction :column :gap 0
                   :children
                   (append
+                   (list (list :type 'ooa-text
+                               :value (org-other-agenda--panel-value
+                                       (propertize "  Agenda"
+                                                   'face 'ooa-day-title)
+                                       'agenda "agenda")))
                    (when parent (list parent))
                    (org-other-agenda--windowed
-                    items offset 'agenda (+ 3 (if parent 1 0))
+                    items offset 'agenda (+ 4 (if parent 1 0))
                     (lambda (item ordinal)
                       (org-other-agenda--agenda-item-element
-                       item todo-width ordinal)))))))))
+                       item todo-width ordinal
+                       (org-other-agenda--agenda-container-row
+                        items ordinal))))))))))
 
 (defun org-other-agenda--someday-page (entries todo-width)
   "Render the undated-task page from `ENTRIES'.
@@ -1278,10 +1549,11 @@ sets the shared state-column width."
             (org-other-agenda--flex-row entry 'someday todo-width ordinal)))))
     (list
      (list :type 'ooa-text
-           :value (org-other-agenda--parent-value
+           :value (org-other-agenda--panel-value
                    (propertize
                     "  Tasks without a date. Press s to schedule; press d to set a deadline."
-                    'face 'org-other-agenda-dim)))
+                    'face 'org-other-agenda-dim)
+                   'someday "someday"))
      (if entries
          (list :type :flex :direction :column :gap 0
                :children windowed)
@@ -1295,6 +1567,7 @@ sets the shared state-column width."
 
 Combine the tab bar, query bar, and selected page in a vertical layout."
   (setq-local org-other-agenda--view t)
+  (add-hook 'eldoc-documentation-functions #'org-other-agenda--eldoc nil t)
   (let* ((tab (or (plist-get textui-state :tab) 'agenda))
          (query-view (memq tab '(search tags)))
          (base (or (plist-get textui-state :base-entries)
@@ -1339,7 +1612,7 @@ Combine the tab bar, query bar, and selected page in a vertical layout."
        (org-other-agenda--query-bar
         query query-kind
         (length entries)
-        query-view)
+        query-view (and query-view tab))
        (list :type :flex :direction :column :gap 0
            :layout (list :width width :min-width 40 :grow 1)
            :children
@@ -1485,20 +1758,330 @@ start of an entry row still selects that row."
   (interactive)
   (org-other-agenda--forward #'org-agenda-set-tags))
 
+(defun org-other-agenda--occurrence-at-point ()
+  "Return source occurrence provenance at point or on its line."
+  (when-let* ((position (org-other-agenda--navigation-position)))
+    (get-text-property position 'org-other-agenda-occurrence)))
+
+(defun org-other-agenda--same-marker-location-p (left right)
+  "Return non-nil when LEFT and RIGHT designate the same source location."
+  (and (markerp left) (markerp right)
+       (marker-buffer left) (marker-buffer right)
+       (= (marker-position left) (marker-position right))
+       (or (eq (marker-buffer left) (marker-buffer right))
+           (let ((left-file (buffer-file-name (marker-buffer left)))
+                 (right-file (buffer-file-name (marker-buffer right))))
+             (and left-file right-file
+                  (equal (file-truename left-file)
+                         (file-truename right-file)))))))
+
+(defun org-other-agenda--heading-anchor (hd)
+  "Return a normalized heading marker copied from HD, or nil."
+  (when (and (markerp hd) (buffer-live-p (marker-buffer hd)))
+    (condition-case nil
+        (with-current-buffer (marker-buffer hd)
+          (save-restriction
+            (widen)
+            (save-excursion
+              (goto-char hd)
+              (org-back-to-heading t)
+              (copy-marker (point) nil))))
+      (error nil))))
+
+(defun org-other-agenda--heading-title (hd)
+  "Return the source heading title for HD, or a useful fallback."
+  (if-let* ((anchor (org-other-agenda--heading-anchor hd)))
+      (prog1
+          (org-with-point-at anchor (org-get-heading t t t t))
+        (set-marker anchor nil))
+    (format "%s" hd)))
+
+(defun org-other-agenda--marked-headings ()
+  "Return the view-local set of normalized heading markers."
+  (and (boundp 'textui-state) (plist-get textui-state :marked)))
+
+(defun org-other-agenda--marked-member-p (anchor)
+  "Return non-nil when normalized heading ANCHOR is marked."
+  (and anchor
+       (cl-some (lambda (marked)
+                  (org-other-agenda--same-marker-location-p anchor marked))
+                (org-other-agenda--marked-headings))))
+
+(defun org-other-agenda--heading-marked-p (hd)
+  "Return non-nil when heading HD belongs to the marked set."
+  (when-let* ((anchor (org-other-agenda--heading-anchor hd)))
+    (prog1 (org-other-agenda--marked-member-p anchor)
+      (set-marker anchor nil))))
+
+(defun org-other-agenda--add-marked-heading (hd marked)
+  "Return MARKED with heading HD added exactly once."
+  (if-let* ((anchor (org-other-agenda--heading-anchor hd)))
+      (if (cl-some (lambda (candidate)
+                     (org-other-agenda--same-marker-location-p
+                      anchor candidate))
+                   marked)
+          (prog1 marked (set-marker anchor nil))
+        (cons anchor marked))
+    marked))
+
+(defun org-other-agenda--remove-marked-heading (hd marked)
+  "Return MARKED without the heading designated by HD."
+  (if-let* ((anchor (org-other-agenda--heading-anchor hd)))
+      (prog1
+          (cl-remove-if
+           (lambda (candidate)
+             (org-other-agenda--same-marker-location-p anchor candidate))
+           marked)
+        (set-marker anchor nil))
+    marked))
+
+(defun org-other-agenda--occurrence-anchor (occurrence)
+  "Return a stable copy of OCCURRENCE's source timestamp anchor."
+  (let ((source (plist-get occurrence :org-marker)))
+    (when (and (markerp source) (marker-buffer source))
+      (with-current-buffer (marker-buffer source)
+        (save-excursion
+          (save-match-data
+            (goto-char source)
+            (copy-marker
+             (if (org-at-timestamp-p 'lax)
+                 (match-beginning 0)
+               (marker-position source))
+             nil)))))))
+
+(defun org-other-agenda--shadow-occurrence-position (occurrence buffer)
+  "Return the exact agenda row for OCCURRENCE in shadow BUFFER."
+  (let ((source (plist-get occurrence :org-marker)))
+    (with-current-buffer buffer
+      (save-excursion
+        (goto-char (point-min))
+        (catch 'found
+          (while (< (point) (point-max))
+            (when (and source
+                       (org-other-agenda--same-marker-location-p
+                        source (org-get-at-bol 'org-marker)))
+              (throw 'found (point)))
+            (forward-line 1))
+          nil)))))
+
+(defun org-other-agenda--position-for-occurrence (occurrence)
+  "Return the preferred rendered position for OCCURRENCE."
+  (let ((source (plist-get occurrence :org-marker))
+        (source-position (plist-get occurrence :source-position))
+        (source-buffer (plist-get occurrence :source-buffer))
+        first button)
+    (save-excursion
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (let ((candidate
+               (get-text-property
+                (point) 'org-other-agenda-occurrence)))
+          (when (let ((marker (plist-get candidate :org-marker)))
+                  (or (and source-position source-buffer
+                           (markerp marker) (marker-buffer marker)
+                           (= source-position (marker-position marker))
+                           (or (eq source-buffer (marker-buffer marker))
+                               (let ((left (buffer-file-name source-buffer))
+                                     (right
+                                      (buffer-file-name (marker-buffer marker))))
+                                 (and left right
+                                      (equal (file-truename left)
+                                             (file-truename right))))))
+                      (and source
+                           (org-other-agenda--same-marker-location-p
+                            source marker))))
+            (unless first (setq first (point)))
+            (when (and (null button) (get-char-property (point) 'button))
+              (setq button (point)))))
+        (goto-char
+         (or (next-single-property-change
+              (point) 'org-other-agenda-occurrence nil (point-max))
+             (point-max))))
+      (or button first))))
+
+(defun org-other-agenda--position-for-heading (hd)
+  "Return the preferred rendered position for heading marker HD."
+  (save-excursion
+    (goto-char (point-min))
+    (let (first button)
+      (while (< (point) (point-max))
+        (when (org-other-agenda--same-marker-location-p
+               hd (org-other-agenda--object-hd (point)))
+          (unless first (setq first (point)))
+          (when (and (null button) (get-char-property (point) 'button))
+            (setq button (point))))
+        (goto-char
+         (or (next-single-property-change
+              (point) 'org-other-agenda-object nil (point-max))
+             (point-max))))
+      (or button first))))
+
+(defun org-other-agenda--forward-occurrence (command)
+  "Run native agenda COMMAND on the exact rendered source occurrence."
+  (let* ((view (current-buffer))
+         (occurrence (org-other-agenda--occurrence-at-point))
+         (hd (org-other-agenda--at-point))
+         (follow-occurrence
+          (and occurrence
+               (let ((copy (copy-sequence occurrence))
+                     (source (org-other-agenda--occurrence-anchor occurrence)))
+                 (when source
+                   (setq copy (plist-put copy :org-marker source))
+                   (setq copy
+                         (plist-put copy :source-position
+                                    (marker-position source)))
+                   (setq copy
+                         (plist-put copy :source-buffer
+                                    (marker-buffer source))))
+                 copy)))
+         (follow-hd (and (markerp hd) (copy-marker hd)))
+         (shadow (org-other-agenda--active-shadow view))
+         (entry-key (org-other-agenda--active-entry-key view))
+         (prefix current-prefix-arg)
+         (shadow-position
+          (and occurrence shadow
+               (org-other-agenda--shadow-occurrence-position
+                occurrence shadow)))
+         succeeded)
+    (unless occurrence
+      (user-error "This heading has no source occurrence at point"))
+    (unless (buffer-live-p shadow)
+      (user-error "Org Other Agenda shadow buffer is not live"))
+    (unless shadow-position
+      (user-error "Could not find this occurrence in the shadow agenda"))
+    (unwind-protect
+        (save-window-excursion
+          (let ((org-agenda-buffer-name (buffer-name shadow))
+                (org-agenda-sticky nil)
+                (org-agenda-window-setup 'current-window)
+                (current-prefix-arg prefix))
+            (with-current-buffer shadow
+              (goto-char shadow-position)
+              ;; `goto-char' does not run the agenda post-command hook.  Mixed
+              ;; series therefore need this explicit component update.
+              (org-agenda-update-agenda-type)
+              (call-interactively command)
+              (setq succeeded t))))
+      (when (buffer-live-p view)
+        (if succeeded
+            (with-current-buffer view
+              ;; Date commands can relocate an occurrence.  Re-running the
+              ;; series is required; editing the old agenda line is not.
+              (let ((current-prefix-arg nil))
+                (org-other-agenda-refresh)))
+          (let ((entries (org-other-agenda--entries shadow)))
+            (textui-set-state view entry-key entries)
+            (when (eq entry-key :base-entries)
+              (textui-set-state view :entries entries))))
+        (textui-refresh view)
+        (with-current-buffer view
+          (when succeeded
+            (when-let* ((position
+                         (or (org-other-agenda--position-for-occurrence
+                              follow-occurrence)
+                             (org-other-agenda--position-for-heading
+                              follow-hd))))
+              (goto-char position)
+              (org-other-agenda--update-current-feedback))))))))
+
+(defun org-other-agenda-date-earlier ()
+  "Move the exact Org timestamp at point earlier through native Agenda."
+  (interactive)
+  (org-other-agenda--forward-occurrence #'org-agenda-do-date-earlier))
+
+(defun org-other-agenda-date-later ()
+  "Move the exact Org timestamp at point later through native Agenda."
+  (interactive)
+  (org-other-agenda--forward-occurrence #'org-agenda-do-date-later))
+
+(defun org-other-agenda-priority-up ()
+  "Raise the current heading priority through native Agenda."
+  (interactive)
+  (org-other-agenda--forward-occurrence #'org-agenda-priority-up))
+
+(defun org-other-agenda-priority-down ()
+  "Lower the current heading priority through native Agenda."
+  (interactive)
+  (org-other-agenda--forward-occurrence #'org-agenda-priority-down))
+
+(defun org-other-agenda-select-day (&optional target)
+  "Select the `ooa-day' represented at point or by Embark TARGET."
+  (interactive)
+  (let ((day (or (and (stringp target) (get-text-property 0 'ooa-day target))
+                 (cdr-safe
+                  (org-other-agenda--noun-object-at-point 'ooa-day)))))
+    (unless (integerp day)
+      (user-error "No calendar day at point"))
+    (textui-set-state (current-buffer) :date day)))
+
+(defvar org-other-agenda-view-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'org-other-agenda-refresh)
+    (define-key map (kbd "/") #'org-other-agenda-search)
+    (define-key map (kbd "\\") #'org-other-agenda-clear-search)
+    (define-key map (kbd "[") #'org-other-agenda-previous-day)
+    (define-key map (kbd "]") #'org-other-agenda-next-day)
+    (define-key map (kbd "n") #'org-other-agenda-next-line)
+    (define-key map (kbd "p") #'org-other-agenda-previous-line)
+    (define-key map (kbd "u") #'org-other-agenda-parent)
+    (define-key map (kbd "m") #'org-other-agenda-mark)
+    (define-key map (kbd "U") #'org-other-agenda-unmark-all)
+    (define-key map (kbd "B") #'org-other-agenda-bulk-action)
+    (define-key map (kbd "<left>") #'org-other-agenda-left)
+    (define-key map (kbd "<right>") #'org-other-agenda-right)
+    (define-key map (kbd "<up>") #'org-other-agenda-up)
+    (define-key map (kbd "<down>") #'org-other-agenda-down)
+    (define-key map (kbd "M-n") #'org-other-agenda-next-panel)
+    (define-key map (kbd "M-p") #'org-other-agenda-previous-panel)
+    (define-key map (kbd "C-v") #'org-other-agenda-page-down)
+    (define-key map (kbd "M-v") #'org-other-agenda-page-up)
+    (define-key map [next] #'org-other-agenda-page-down)
+    (define-key map [prior] #'org-other-agenda-page-up)
+    (define-key map (kbd "TAB") #'widget-forward)
+    (define-key map (kbd "<backtab>") #'widget-backward)
+    (define-key map (kbd "q") #'quit-window)
+    (dotimes (i 6)
+      (let ((index i))
+        (define-key map (kbd (number-to-string (1+ index)))
+                    (lambda ()
+                      (interactive)
+                      (org-other-agenda-select-tab index)))))
+    map)
+  "View-wide verbs shared by the mode and renderer-owned object maps.")
+
+(defvar org-other-agenda-day-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "m") #'org-other-agenda-mark-day)
+    (define-key map (kbd "s") #'org-other-agenda-schedule-set-here)
+    map)
+  "Direct and Embark actions for an `ooa-day' noun.")
+
+(defvar org-other-agenda-slot-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "s") #'org-other-agenda-schedule-set-here)
+    map)
+  "Direct and Embark actions for an `ooa-slot' noun.")
+
 (defvar org-other-agenda-entry-map
   (let ((map (make-sparse-keymap)))
     ;; Emacs 31 exposes this as `widget-keymap'; use the more specific name
     ;; when a future widget.el provides it.
     (set-keymap-parent
      map
-     (if (boundp 'widget-button-keymap)
-         (symbol-value 'widget-button-keymap)
-       (symbol-value 'widget-keymap)))
+     (make-composed-keymap
+      (list org-other-agenda-view-map
+            (if (boundp 'widget-button-keymap)
+                (symbol-value 'widget-button-keymap)
+              (symbol-value 'widget-keymap)))))
     (define-key map (kbd "t") #'org-other-agenda-todo)
     (define-key map (kbd "s") #'org-other-agenda-schedule)
     (define-key map (kbd "d") #'org-other-agenda-deadline)
     (define-key map (kbd ",") #'org-other-agenda-priority)
     (define-key map (kbd ":") #'org-other-agenda-set-tags)
+    (define-key map (kbd "S-<left>") #'org-other-agenda-date-earlier)
+    (define-key map (kbd "S-<right>") #'org-other-agenda-date-later)
+    (define-key map (kbd "S-<up>") #'org-other-agenda-priority-up)
+    (define-key map (kbd "S-<down>") #'org-other-agenda-priority-down)
     map)
   "Keymap for direct actions on the rendered Org entry at point.
 
@@ -1537,23 +2120,7 @@ re-laid out together."
   :group 'org-other-agenda)
 
 (defvar org-other-agenda-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") #'org-other-agenda-refresh)
-    (define-key map (kbd "/") #'org-other-agenda-search)
-    (define-key map (kbd "\\") #'org-other-agenda-clear-search)
-    (define-key map (kbd "[") #'org-other-agenda-previous-day)
-    (define-key map (kbd "]") #'org-other-agenda-next-day)
-    (define-key map (kbd "n") #'org-other-agenda-next-line)
-    (define-key map (kbd "p") #'org-other-agenda-previous-line)
-    (define-key map (kbd "u") #'org-other-agenda-parent)
-    (define-key map (kbd "C-v") #'org-other-agenda-page-down)
-    (define-key map (kbd "M-v") #'org-other-agenda-page-up)
-    (define-key map [next] #'org-other-agenda-page-down)
-    (define-key map [prior] #'org-other-agenda-page-up)
-    (dotimes (i 6)
-      (define-key map (kbd (number-to-string (1+ i)))
-                  (lambda () (interactive) (org-other-agenda-select-tab i))))
-    map)
+  (copy-keymap org-other-agenda-view-map)
   "Keys added to the view on top of the TextUI and widget bindings.")
 
 (defun org-other-agenda-select-tab (index)
@@ -1661,12 +2228,639 @@ implementation; all tabs now use `org-other-agenda--viewport-scroll'."
 (defun org-other-agenda-next-line ()
   "Move point to the next rendered entry row."
   (interactive)
-  (org-other-agenda--move-to-entry 1))
+  (org-other-agenda--move-to-entry 1)
+  (org-other-agenda--update-current-feedback))
 
 (defun org-other-agenda-previous-line ()
   "Move point to the previous rendered entry row."
   (interactive)
-  (org-other-agenda--move-to-entry -1))
+  (org-other-agenda--move-to-entry -1)
+  (org-other-agenda--update-current-feedback))
+
+(defun org-other-agenda--navigation-position (&optional property)
+  "Return a position for navigation PROPERTY at point or on its line."
+  (let ((property (or property 'org-other-agenda-place)))
+    (or (and (get-text-property (point) property) (point))
+        (and (> (point) (point-min))
+             (get-text-property (1- (point)) property)
+             (1- (point)))
+        (save-excursion
+          (goto-char (line-beginning-position))
+          (let ((end (line-end-position)))
+            (catch 'found
+              (while (< (point) end)
+                (when (get-text-property (point) property)
+                  (throw 'found (point)))
+                (forward-char 1))
+              nil))))))
+
+(defun org-other-agenda--place-at-point ()
+  "Return the structural place at point or on the current line."
+  (when-let* ((position (org-other-agenda--navigation-position)))
+    (get-text-property position 'org-other-agenda-place)))
+
+(defun org-other-agenda--position-for-place (place)
+  "Return the preferred rendered position for PLACE."
+  (save-excursion
+    (goto-char (point-min))
+    (let (first button)
+      (while (< (point) (point-max))
+        (when (equal (get-text-property (point) 'org-other-agenda-place) place)
+          (unless first (setq first (point)))
+          (when (and (null button) (get-char-property (point) 'button))
+            (setq button (point))))
+        (goto-char
+         (or (next-single-property-change
+              (point) 'org-other-agenda-place nil (point-max))
+             (point-max))))
+      (or button first))))
+
+(defun org-other-agenda--rendered-places (panel)
+  "Return the distinct structural places currently rendered for PANEL."
+  (save-excursion
+    (goto-char (point-min))
+    (let (places)
+      (while (< (point) (point-max))
+        (let ((place (get-text-property (point) 'org-other-agenda-place)))
+          (when (and (consp place) (eq (car place) panel))
+            (cl-pushnew place places :test #'equal)))
+        (goto-char
+         (or (next-single-property-change
+              (point) 'org-other-agenda-place nil (point-max))
+             (point-max))))
+      places)))
+
+(defun org-other-agenda--page-entries (panel &optional col)
+  "Return semantic entries belonging to navigation PANEL and optional COL."
+  (let* ((base (or (plist-get textui-state :base-entries)
+                   (plist-get textui-state :entries)))
+         (query (plist-get textui-state :query-entries))
+         (selected (or (plist-get textui-state :date) (org-today)))
+         (dow (mod (- (calendar-day-of-week
+                       (calendar-gregorian-from-absolute selected)) 1) 7))
+         (monday (- selected dow)))
+    (pcase panel
+      ('agenda (cdr (assq 'agenda (org-other-agenda--classify base))))
+      ('someday (cdr (assq 'someday (org-other-agenda--classify base))))
+      ((or 'search 'tags)
+       (cdr (assq panel (org-other-agenda--classify query))))
+      ('day-other
+       (cl-remove-if
+        (lambda (entry) (plist-get entry :time))
+        (cl-remove-if-not
+         (lambda (entry)
+           (and (eq (plist-get entry :type) 'agenda)
+                (equal (plist-get entry :dayabs) selected)))
+         base)))
+      ('week-days
+       (cl-remove-if-not
+        (lambda (entry)
+          (and (eq (plist-get entry :type) 'agenda)
+               (equal (plist-get entry :dayabs) (+ monday col))
+               (not (equal (plist-get entry :etype) "block"))))
+        base))
+      (_ nil))))
+
+(defun org-other-agenda--rendered-heading-places (panel)
+  "Return rendered `(PLACE . HEADING)' pairs belonging to PANEL."
+  (save-excursion
+    (goto-char (point-min))
+    (let (pairs)
+      (while (< (point) (point-max))
+        (let ((place (get-text-property (point) 'org-other-agenda-place))
+              (hd (org-other-agenda--object-hd (point))))
+          (when (and (consp place) (eq (car place) panel) hd)
+            (cl-pushnew (cons place hd) pairs
+                        :test (lambda (left right)
+                                (and (equal (car left) (car right))
+                                     (org-other-agenda--same-marker-location-p
+                                      (cdr left) (cdr right)))))))
+        (goto-char
+         (or (next-single-property-change
+              (point) 'org-other-agenda-place nil (point-max))
+             (point-max))))
+      pairs)))
+
+(defun org-other-agenda--rectangle-heading-places (panel)
+  "Return all semantic `(PLACE . HEADING)' pairs in PANEL."
+  (pcase panel
+    ('agenda
+     (cl-loop for item in
+              (org-other-agenda--agenda-items
+               (org-other-agenda--page-entries 'agenda))
+              for row from 0
+              when (eq (plist-get item :kind) 'entry)
+              collect (cons (list 'agenda 0 row)
+                            (plist-get (plist-get item :entry) :hd))))
+    ((or 'someday 'search 'tags 'day-other)
+     (cl-loop for entry in (org-other-agenda--page-entries panel)
+              for row from 0
+              collect (cons (list panel 0 row) (plist-get entry :hd))))
+    ('day-overflow
+     (cl-loop for block in (plist-get textui-state :day-overflow)
+              for row from 0
+              collect (cons (list panel 0 row)
+                            (plist-get (plist-get block :entry) :hd))))
+    ('week-days
+     (cl-loop for col from 0 below 7 append
+              (cl-loop for entry in
+                       (org-other-agenda--page-entries panel col)
+                       for row from 0
+                       collect (cons (list panel col row)
+                                     (plist-get entry :hd)))))
+    ((or 'week-bars 'day-timeblock)
+     (org-other-agenda--rendered-heading-places panel))
+    (_ nil)))
+
+(defun org-other-agenda--place-in-rectangle-p (place start end)
+  "Return non-nil when PLACE is inside the closed START to END rectangle."
+  (and (eq (car place) (car start))
+       (>= (nth 2 place) 0)
+       (<= (min (nth 1 start) (nth 1 end))
+           (nth 1 place)
+           (max (nth 1 start) (nth 1 end)))
+       (<= (min (nth 2 start) (nth 2 end))
+           (nth 2 place)
+           (max (nth 2 start) (nth 2 end)))))
+
+(defun org-other-agenda--selection-refresh (place)
+  "Synchronously render selection state and restore structural PLACE."
+  (textui-refresh (current-buffer))
+  (when-let* ((position (org-other-agenda--position-for-place place)))
+    (goto-char position)
+    (org-other-agenda--update-current-feedback)))
+
+(defun org-other-agenda--day-headings (day)
+  "Return the heading markers represented on absolute DAY."
+  (let ((entries (append (plist-get textui-state :base-entries)
+                         (plist-get textui-state :query-entries)))
+        headings)
+    (dolist (entry entries (nreverse headings))
+      (when (equal (plist-get entry :dayabs) day)
+        (let ((hd (plist-get entry :hd)))
+          (unless (cl-some
+                   (lambda (candidate)
+                     (org-other-agenda--same-marker-location-p hd candidate))
+                   headings)
+            (push hd headings)))))))
+
+(defun org-other-agenda-mark-day (&optional target)
+  "Toggle all headings on the day at point or Embark TARGET."
+  (interactive)
+  (let* ((day (or (and (stringp target)
+                       (get-text-property 0 'ooa-day target))
+                  (cdr-safe
+                   (org-other-agenda--noun-object-at-point 'ooa-day))))
+         (place (org-other-agenda--place-at-point))
+         (headings (and (integerp day)
+                        (org-other-agenda--day-headings day)))
+         (marked (org-other-agenda--marked-headings)))
+    (unless (integerp day)
+      (user-error "No calendar day at point"))
+    (if (null headings)
+        (progn
+          (setq textui-state
+                (plist-put textui-state :rectangle-anchor nil))
+          (message "No headings on this day"))
+      (if (cl-every #'org-other-agenda--heading-marked-p headings)
+          (dolist (hd headings)
+            (setq marked
+                  (org-other-agenda--remove-marked-heading hd marked)))
+        (dolist (hd headings)
+          (setq marked (org-other-agenda--add-marked-heading hd marked))))
+      (setq textui-state (plist-put textui-state :marked marked))
+      (setq textui-state
+            (plist-put textui-state :rectangle-anchor nil))
+      (org-other-agenda--selection-refresh place)
+      (message "%d headings marked" (length marked)))))
+
+(defun org-other-agenda--mark-rectangle (start end marked)
+  "Return MARKED with every heading in the START to END rectangle added."
+  (dolist (pair (org-other-agenda--rectangle-heading-places (car start)) marked)
+    (when (org-other-agenda--place-in-rectangle-p (car pair) start end)
+      (setq marked
+            (org-other-agenda--add-marked-heading (cdr pair) marked)))))
+
+(defun org-other-agenda-mark ()
+  "Toggle a heading mark or complete a structural rectangle selection.
+
+The first invocation stores the current structural place as an anchor.  A
+second invocation at another place in the same panel adds the closed rectangle
+and clears the anchor.  Repeating the command at the anchor only ends the
+rectangle gesture, leaving the single-heading toggle unchanged."
+  (interactive)
+  (let* ((place (org-other-agenda--place-at-point))
+         (object (org-other-agenda--embark-object-at-point))
+         (hd (and (eq (car-safe object) 'org-heading) (cdr object)))
+         (day-object (and (eq (car-safe object) 'ooa-day) object))
+         (anchor (plist-get textui-state :rectangle-anchor))
+         (marked (org-other-agenda--marked-headings)))
+    (cond
+     (day-object
+      (org-other-agenda-mark-day))
+     ((or (null place) (< (nth 2 place) 0))
+      (user-error "No selectable structural cell at point"))
+     ((and anchor (not (eq (car anchor) (car place))))
+      (user-error "Rectangle endpoints must belong to the same panel"))
+     (anchor
+      (unless (equal anchor place)
+        (setq marked
+              (org-other-agenda--mark-rectangle anchor place marked)))
+      (setq textui-state (plist-put textui-state :marked marked))
+      (setq textui-state
+            (plist-put textui-state :rectangle-anchor nil))
+      (org-other-agenda--selection-refresh place)
+      (message "%d headings marked" (length marked)))
+     (t
+      (when hd
+        (setq marked
+              (if (org-other-agenda--heading-marked-p hd)
+                  (org-other-agenda--remove-marked-heading hd marked)
+                (org-other-agenda--add-marked-heading hd marked))))
+      (setq textui-state (plist-put textui-state :marked marked))
+      (setq textui-state
+            (plist-put textui-state :rectangle-anchor place))
+      (org-other-agenda--selection-refresh place)
+      (message "%d headings marked; rectangle anchor set" (length marked))))))
+
+(defun org-other-agenda-unmark-all ()
+  "Clear the marked heading set and any pending rectangle anchor."
+  (interactive)
+  (let ((place (org-other-agenda--place-at-point)))
+    (dolist (marker (org-other-agenda--marked-headings))
+      (when (markerp marker) (set-marker marker nil)))
+    (setq textui-state (plist-put textui-state :marked nil))
+    (setq textui-state
+          (plist-put textui-state :rectangle-anchor nil))
+    (org-other-agenda--selection-refresh place)
+    (message "No headings marked")))
+
+(defun org-other-agenda--shadow-heading (heading shadow)
+  "Return `(POSITION . MARKER)' for HEADING in agenda SHADOW, or nil."
+  (with-current-buffer shadow
+    (save-excursion
+      (goto-char (point-min))
+      (catch 'found
+        (while (< (point) (point-max))
+          (let* ((candidate (org-get-at-bol 'org-hd-marker))
+                 (anchor (org-other-agenda--heading-anchor candidate)))
+            (when anchor
+              (let ((same (org-other-agenda--same-marker-location-p
+                           heading anchor)))
+                (set-marker anchor nil)
+                (when same
+                  (throw 'found (cons (point) candidate))))))
+          (forward-line 1))
+        nil))))
+
+(defun org-other-agenda--resolve-marked-headings (shadow)
+  "Resolve every marked heading to SHADOW's exact agenda marker objects."
+  (let (resolved missing)
+    (dolist (heading (org-other-agenda--marked-headings))
+      (if-let* ((pair (and (buffer-live-p shadow)
+                           (org-other-agenda--shadow-heading heading shadow))))
+          (push (cdr pair) resolved)
+        (push (org-other-agenda--heading-title heading) missing)))
+    (when missing
+      (user-error "Marked headings are absent from this agenda: %s"
+                  (mapconcat #'identity (nreverse missing) ", ")))
+    (nreverse resolved)))
+
+(defun org-other-agenda-bulk-action ()
+  "Run native `org-agenda-bulk-action' on the marked heading set."
+  (interactive)
+  (let* ((view (current-buffer))
+         (place (org-other-agenda--place-at-point))
+         (shadow (org-other-agenda--active-shadow view))
+         (prefix current-prefix-arg)
+         (marked (org-other-agenda--marked-headings))
+         (resolved (and marked
+                        (org-other-agenda--resolve-marked-headings shadow)))
+         succeeded keep-marks failure)
+    (unless marked
+      (user-error "No headings marked"))
+    (condition-case error-data
+        (save-window-excursion
+          (let ((org-agenda-buffer-name (buffer-name shadow))
+                (org-agenda-sticky nil)
+                (org-agenda-window-setup 'current-window)
+                (current-prefix-arg prefix))
+            (with-current-buffer shadow
+              (let ((org-agenda-bulk-marked-entries resolved))
+                (goto-char
+                 (or (text-property-any
+                      (point-min) (point-max)
+                      'org-hd-marker (car resolved))
+                     (point-min)))
+                (org-agenda-update-agenda-type)
+                (call-interactively #'org-agenda-bulk-action)
+                (setq succeeded t
+                      keep-marks
+                      (and org-agenda-bulk-marked-entries t))))))
+      ((error quit) (setq failure error-data)))
+    (when (buffer-live-p view)
+      (with-current-buffer view
+        (when (and succeeded (not keep-marks))
+          (setq textui-state (plist-put textui-state :marked nil)))
+        (setq textui-state
+              (plist-put textui-state :rectangle-anchor nil))
+        (org-other-agenda-refresh)
+        (textui-refresh view)
+        (when (and place
+                   (org-other-agenda--position-for-place place))
+          (goto-char (org-other-agenda--position-for-place place)))))
+    (when failure
+      (signal (car failure) (cdr failure)))))
+
+(defun org-other-agenda--schedule-target (target)
+  "Return `(DAY START END)' represented by Embark TARGET or point."
+  (or (and (stringp target)
+           (or (get-text-property 0 'ooa-slot target)
+               (when-let* ((day (get-text-property 0 'ooa-day target)))
+                 (list day nil nil))))
+      (when-let* ((slot
+                   (org-other-agenda--noun-object-at-point 'ooa-slot)))
+        (cdr slot))
+      (when-let* ((day
+                   (cdr-safe
+                    (org-other-agenda--noun-object-at-point 'ooa-day))))
+        (list day nil nil))))
+
+(defun org-other-agenda--schedule-time (day start)
+  "Return an Org date string for absolute DAY and optional START minutes."
+  (pcase-let ((`(,month ,date ,year)
+               (calendar-gregorian-from-absolute day)))
+    (format "%04d-%02d-%02d%s" year month date
+            (if start
+                (format " %02d:%02d" (/ start 60) (% start 60))
+              ""))))
+
+(defun org-other-agenda-schedule-set-here (&optional target)
+  "Schedule every marked heading on the day or slot at point.
+
+TARGET is the string supplied by an Embark day or slot action.  Each heading
+is delegated independently to `org-agenda-schedule'.  Successful headings are
+removed from the set; failures remain marked and are summarized."
+  (interactive)
+  (let* ((view (current-buffer))
+         (place (org-other-agenda--place-at-point))
+         (destination (org-other-agenda--schedule-target target))
+         (day (nth 0 destination))
+         (start (nth 1 destination))
+         (shadow (org-other-agenda--active-shadow view))
+         (time (and (integerp day)
+                    (org-other-agenda--schedule-time day start)))
+         (marked (copy-sequence (org-other-agenda--marked-headings)))
+         (remaining (org-other-agenda--marked-headings))
+         successes failures)
+    (unless destination
+      (user-error "No day or time slot at point"))
+    (unless marked
+      (user-error "No headings marked"))
+    (dolist (heading marked)
+      (let ((title (org-other-agenda--heading-title heading))
+            (pair (and (buffer-live-p shadow)
+                       (org-other-agenda--shadow-heading heading shadow))))
+        (if (null pair)
+            (push (format "%s (absent from this agenda)" title) failures)
+          (condition-case error-data
+              (save-window-excursion
+                (let ((org-agenda-buffer-name (buffer-name shadow))
+                      (org-agenda-sticky nil)
+                      (org-agenda-window-setup 'current-window))
+                  (with-current-buffer shadow
+                    (goto-char (car pair))
+                    (org-agenda-update-agenda-type)
+                    (org-agenda-schedule nil time)))
+                (push title successes)
+                (setq remaining
+                      (org-other-agenda--remove-marked-heading
+                       heading remaining)))
+            (error
+             (push (format "%s (%s)" title
+                           (error-message-string error-data))
+                   failures))))))
+    (setq textui-state (plist-put textui-state :marked remaining))
+    (setq textui-state
+          (plist-put textui-state :rectangle-anchor nil))
+    (org-other-agenda-refresh)
+    (textui-refresh view)
+    (when (and place (org-other-agenda--position-for-place place))
+      (goto-char (org-other-agenda--position-for-place place)))
+    (let ((report
+           (format "Scheduled %d; failed %d%s"
+                   (length successes) (length failures)
+                   (if failures
+                       (concat ": "
+                               (mapconcat #'identity
+                                          (nreverse failures) "; "))
+                     ""))))
+      (message "%s" report)
+      report)))
+
+(defun org-other-agenda--panel-row-count (panel col)
+  "Return the number of non-header structural rows in PANEL column COL."
+  (pcase panel
+    ('agenda
+     (length (org-other-agenda--agenda-items
+              (org-other-agenda--page-entries 'agenda))))
+    ((or 'someday 'search 'tags 'day-other 'week-days)
+     (length (org-other-agenda--page-entries panel col)))
+    ('day-overflow (length (plist-get textui-state :day-overflow)))
+    ('day-calendar 6)
+    ('day-timeblock 20)
+    (_
+     (let ((rows (delq nil
+                       (mapcar (lambda (place)
+                                 (and (>= (nth 2 place) 0) (nth 2 place)))
+                               (org-other-agenda--rendered-places panel)))))
+       (if rows (1+ (apply #'max rows)) 0)))))
+
+(defun org-other-agenda--simple-vertical-panel-p (panel)
+  "Return non-nil when PANEL has one vertical structural column."
+  (memq panel '(agenda someday search tags day-overflow day-other)))
+
+(defun org-other-agenda--neighbor-place (place direction)
+  "Return PLACE's structural neighbor in DIRECTION, or nil."
+  (pcase-let ((`(,panel ,col ,row) place))
+    (cond
+     ((org-other-agenda--simple-vertical-panel-p panel)
+      (when (memq direction '(up down))
+        (let ((target (+ row (if (eq direction 'up) -1 1)))
+              (count (org-other-agenda--panel-row-count panel col)))
+          (and (>= target 0) (< target count)
+               (list panel col target)))))
+     ((eq panel 'day-calendar)
+      (let* ((index (+ (* row 7) col))
+             (target
+              (pcase direction
+                ('left (1- index)) ('right (1+ index))
+                ('up (- index 7)) ('down (+ index 7)))))
+        (and target (<= 0 target) (< target 42)
+             (list panel (% target 7) (/ target 7)))))
+     ((eq panel 'day-timeblock)
+      (let ((target-col (+ col (pcase direction ('left -1) ('right 1) (_ 0))))
+            (target-row (+ row (pcase direction ('up -1) ('down 1) (_ 0))))
+            (places (org-other-agenda--rendered-places panel)))
+        (cl-find (list panel target-col target-row) places :test #'equal)))
+     ((eq panel 'week-bars)
+      (let ((target (pcase direction
+                      ('left (list panel (1- col) row))
+                      ('right (list panel (1+ col) row))
+                      ('up (list panel col (1- row)))
+                      ('down (list panel col (1+ row))))))
+        (cl-find target (org-other-agenda--rendered-places panel) :test #'equal)))
+     ((eq panel 'week-days)
+      (pcase direction
+        ((or 'left 'right)
+         (let ((target-col (+ col (if (eq direction 'left) -1 1))))
+           (when (<= 0 target-col 6)
+             (let ((count (org-other-agenda--panel-row-count panel target-col)))
+               (list panel target-col
+                     (if (< row 0) -1
+                       (if (> count 0) (min row (1- count)) -1)))))))
+        ('up
+         (and (> row -1) (list panel col (1- row))))
+        ('down
+         (let ((count (org-other-agenda--panel-row-count panel col)))
+           (and (< row (1- count)) (list panel col (1+ row)))))))
+     (t nil))))
+
+(defun org-other-agenda--place-viewport-scope (place)
+  "Return the viewport scope capable of exposing PLACE."
+  (pcase (car place)
+    ('agenda 'agenda)
+    ('day-other 'day)
+    ('week-days 'week)
+    ('someday 'someday)
+    ('search 'search)
+    ('tags 'tags)
+    (_ nil)))
+
+(defun org-other-agenda--expose-place (place)
+  "Adjust one viewport and synchronously render PLACE."
+  (when-let* ((scope (org-other-agenda--place-viewport-scope place)))
+    (let* ((row (nth 2 place))
+           (offset (org-other-agenda--viewport-offset scope))
+           (page-size (or (plist-get textui-state
+                                     (org-other-agenda--viewport-key
+                                      scope "page-size"))
+                          (org-other-agenda--viewport-page-size scope)))
+           (visible (max 1 (1- page-size)))
+           (next (cond ((< row offset) row)
+                       ((>= row (+ offset visible))
+                        (max 0 (- row visible -1)))
+                       (t offset))))
+      (unless (= next offset)
+        (textui-set-state
+         (current-buffer)
+         (org-other-agenda--viewport-key scope "offset") next)
+        (textui-refresh (current-buffer))))))
+
+(defun org-other-agenda--move-structural (direction)
+  "Move point to the structural neighbor in DIRECTION."
+  (let* ((place (org-other-agenda--place-at-point))
+         (target (and place
+                      (org-other-agenda--neighbor-place place direction))))
+    (cond
+     ((null place) (message "No structural noun at point"))
+     ((null target)
+      (message "No %s neighbor in %s" direction (car place)))
+     (t
+      (or (org-other-agenda--position-for-place target)
+          (progn
+            (org-other-agenda--expose-place target)
+            (org-other-agenda--position-for-place target)))
+      (if-let* ((position (org-other-agenda--position-for-place target)))
+          (progn
+            (goto-char position)
+            (org-other-agenda--update-current-feedback))
+        (message "Could not expose %s in %s" target (car place)))))))
+
+(defun org-other-agenda-left ()
+  "Move point to the left structural neighbor."
+  (interactive)
+  (org-other-agenda--move-structural 'left))
+
+(defun org-other-agenda-right ()
+  "Move point to the right structural neighbor."
+  (interactive)
+  (org-other-agenda--move-structural 'right))
+
+(defun org-other-agenda-up ()
+  "Move point to the upper structural neighbor."
+  (interactive)
+  (org-other-agenda--move-structural 'up))
+
+(defun org-other-agenda-down ()
+  "Move point to the lower structural neighbor."
+  (interactive)
+  (org-other-agenda--move-structural 'down))
+
+(defun org-other-agenda--panel-order ()
+  "Return the ordered structural panels for the active tab."
+  (pcase (plist-get textui-state :tab)
+    ('day (append '(day-calendar day-timeblock)
+                  (and (plist-get textui-state :day-overflow)
+                       '(day-overflow))
+                  '(day-other)))
+    ('week
+     (append (and (> (org-other-agenda--panel-row-count 'week-bars 0) 0)
+                  '(week-bars))
+             '(week-days)))
+    ('agenda '(agenda))
+    ('someday '(someday))
+    ('search '(search))
+    ('tags '(tags))
+    (_ nil)))
+
+(defun org-other-agenda--place-less-p (left right)
+  "Return non-nil when LEFT precedes RIGHT inside one panel."
+  (or (< (nth 2 left) (nth 2 right))
+      (and (= (nth 2 left) (nth 2 right))
+           (< (nth 1 left) (nth 1 right)))))
+
+(defun org-other-agenda--first-place-in-panel (panel)
+  "Return the first rendered noun place in PANEL, falling back to its title."
+  (let* ((places (org-other-agenda--rendered-places panel))
+         (body (cl-remove-if (lambda (place) (< (nth 2 place) 0)) places))
+         (headers (cl-remove-if-not (lambda (place) (= (nth 2 place) -1)) places)))
+    (car (sort (or body headers
+                   (and (member (org-other-agenda--panel-place panel) places)
+                        (list (org-other-agenda--panel-place panel))))
+               #'org-other-agenda--place-less-p))))
+
+(defun org-other-agenda--move-panel (direction)
+  "Move to the adjacent panel in DIRECTION without wrapping."
+  (let* ((place (org-other-agenda--place-at-point))
+         (panel (car-safe place))
+         (order (org-other-agenda--panel-order))
+         (index (cl-position panel order))
+         (target-index (and index (+ index direction)))
+         (target-panel (and target-index
+                            (<= 0 target-index)
+                            (< target-index (length order))
+                            (nth target-index order)))
+         (target-place (and target-panel
+                            (org-other-agenda--first-place-in-panel target-panel))))
+    (if-let* ((position (and target-place
+                             (org-other-agenda--position-for-place target-place))))
+        (progn
+          (goto-char position)
+          (org-other-agenda--update-current-feedback))
+      (message "No %s panel from %s"
+               (if (> direction 0) "next" "previous")
+               (or panel "this point")))))
+
+(defun org-other-agenda-next-panel ()
+  "Move to the first noun of the next panel."
+  (interactive)
+  (org-other-agenda--move-panel 1))
+
+(defun org-other-agenda-previous-panel ()
+  "Move to the first noun of the previous panel."
+  (interactive)
+  (org-other-agenda--move-panel -1))
 
 (defun org-other-agenda--parent-position-on-line ()
   "Return the first parent-property position on the current line, or nil."
@@ -1681,22 +2875,62 @@ implementation; all tabs now use `org-other-agenda--viewport-scroll'."
         nil))))
 
 (defun org-other-agenda-parent ()
-  "Move to the nearest date or section header above point.
-
-This is the one-dimensional parent relation for step 2; two-dimensional
-parent relationships are added in step 3."
+  "Move point to its explicit structural parent."
   (interactive)
-  (let ((position
-         (save-excursion
-           (beginning-of-line)
-           (catch 'found
-             (while (= 0 (forward-line -1))
-               (when-let* ((position (org-other-agenda--parent-position-on-line)))
-                 (throw 'found position)))
-             nil))))
-    (if position
-        (goto-char position)
-      (message "No parent header"))))
+  (if-let* ((position (org-other-agenda--navigation-position))
+            (context (get-text-property
+                      position 'org-other-agenda-context))
+            (parent-place (car context))
+            (parent-position
+             (org-other-agenda--position-for-place parent-place)))
+      (progn
+        (goto-char parent-position)
+        (org-other-agenda--update-current-feedback))
+    (message "At top")))
+
+(defun org-other-agenda--clear-current-feedback ()
+  "Delete the current-object feedback overlays."
+  (mapc #'delete-overlay org-other-agenda--current-object-overlays)
+  (setq org-other-agenda--current-object-overlays nil))
+
+(defun org-other-agenda--update-current-feedback ()
+  "Highlight every rendered span of the structural noun at point."
+  (org-other-agenda--clear-current-feedback)
+  (when-let* ((place (org-other-agenda--place-at-point)))
+    (save-excursion
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (let* ((start (point))
+               (value (get-text-property start 'org-other-agenda-place))
+               (end (or (next-single-property-change
+                         start 'org-other-agenda-place nil (point-max))
+                        (point-max))))
+          (when (equal value place)
+            (let ((overlay (make-overlay start end nil t nil)))
+              (overlay-put overlay 'face 'org-other-agenda-current-object)
+              (overlay-put overlay 'priority 20)
+              (push overlay org-other-agenda--current-object-overlays)))
+          (goto-char end))))))
+
+(defun org-other-agenda--eldoc ()
+  "Return structural identity text for the noun at point."
+  (when-let* ((position (org-other-agenda--navigation-position))
+              (place (get-text-property position 'org-other-agenda-place)))
+    (let* ((panel (car place))
+           (col (nth 1 place))
+           (row (nth 2 place))
+           (node (get-text-property position 'org-other-agenda-node))
+           (object (get-text-property position 'org-other-agenda-object))
+           (total (and (>= row 0)
+                       (org-other-agenda--panel-row-count panel col)))
+           (identity
+            (cond ((and (consp node) (cdr node)) (format "%s" (cdr node)))
+                  ((consp object) (format "%s" (car object)))
+                  (t "structure"))))
+      (format "%s · col %s · %s · %s"
+              panel col
+              (if total (format "%d/%d" (1+ row) total) "header")
+              identity))))
 
 (defun org-other-agenda--viewport-page (direction)
   "Move one viewport page in `DIRECTION'."
@@ -1846,6 +3080,8 @@ is overridden.  The blocks shown come from `org-other-agenda-series'."
                                      :query-entries nil
                                      :query nil
                                      :query-kind 'search
+                                     :marked nil
+                                     :rectangle-anchor nil
                                      :agenda-offset 0
                                      :agenda-page-size 40
                                      :day-offset 0
@@ -1858,10 +3094,16 @@ is overridden.  The blocks shown come from `org-other-agenda-series'."
       (setq-local buffer-read-only t)
       (use-local-map (make-composed-keymap org-other-agenda-mode-map
                                            (current-local-map)))
-      (add-hook 'post-command-hook #'org-other-agenda--follow-viewport nil t))
+      (add-hook 'post-command-hook #'org-other-agenda--follow-viewport nil t)
+      (add-hook 'post-command-hook
+                #'org-other-agenda--update-current-feedback nil t))
       buffer)))
 
-(cl-pushnew #'org-other-agenda-embark-target embark-target-finders)
+(setq embark-target-finders
+      (delq #'org-other-agenda-embark-target embark-target-finders))
+(cl-pushnew #'org-other-agenda-embark-targets embark-target-finders)
+(add-to-list 'embark-keymap-alist '(ooa-day org-other-agenda-day-map))
+(add-to-list 'embark-keymap-alist '(ooa-slot org-other-agenda-slot-map))
 (cl-pushnew #'org-other-agenda--embark-refresh
             (alist-get :always embark-post-action-hooks))
 
