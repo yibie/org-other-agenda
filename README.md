@@ -67,6 +67,27 @@ The package overrides nothing.
 Someday and Agenda are complementary and do not overlap: everything with a date
 is in Agenda, everything without one is in Someday.
 
+## Interaction model
+
+The design grew out of [an r/emacs discussion](https://www.reddit.com/r/emacs/comments/1vuw4lp/comment/p559avf/)
+about what happens when an Emacs interface gains a second dimension. Classic
+list interfaces work because "current line = current object." Today and Week
+break that equation: point can be inside a heading, a time slot and a day at
+the same time. A 2D interface needs a way to act on "the object whose rectangle
+contains point."
+
+org-other-agenda separates movement from action. Movement is a small set of
+view-wide verbs: next, previous, four directions, parent and panel changes.
+Actions belong to typed nouns at point: `org-heading`, `ooa-slot` and
+`ooa-day`. Embark is the discoverable menu for those nouns; direct keys are the
+fast path once the action becomes familiar.
+
+Point remains the only persistent target. On an occupied Today cell, Embark
+can cycle through `org-heading` → `ooa-slot` → `ooa-day`, and the next action
+uses the noun that was actually selected. The same model covers empty time
+slots, Week bars, date headers and ordinary list rows without pretending they
+are all widgets or all lines.
+
 ## Keys
 
 | Group | Key | Action |
@@ -81,6 +102,7 @@ is in Agenda, everything without one is in Someday.
 | Change the entry occurrence at point | `S-<left>` `S-<right>` | move its native Org timestamp earlier / later |
 | Change the heading at point | `S-<up>` `S-<down>` | raise / lower its native Org priority |
 | Act on the entry at point | `t` `s` `d` `,` `:` | TODO state, schedule, deadline, priority, tags |
+| Act on a Today overflow/pinned entry | `C-c C-p` | pin / unpin it in the main time-block lane |
 | Act on the entry at point | `RET` or mouse-1 | visit the Org entry |
 | Act on the entry at point | `embark-act` | open the Embark menu; the full `embark-org-heading-map` is available |
 | Select | `m` | mark one heading, a whole day, or complete a structural rectangle |
@@ -122,6 +144,10 @@ time, while day scheduling writes a date without a time. Unlike `B`, this path
 continues after an individual failure, removes successful headings from the
 set, retains failures, and reports both counts at the end. Use `embark-act` to
 discover the nested heading → slot → day actions on occupied cells.
+
+On Today, an overflow heading conditionally adds a pin action to its Embark
+menu; once pinned, the same action becomes unpin.  `C-c C-p` is its direct
+shortcut.  The numbered overflow button retains its existing RET/mouse action.
 
 ## Searching
 

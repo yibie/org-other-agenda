@@ -30,6 +30,47 @@
 (defconst org-other-agenda-test--view-buffer "*Org Other Agenda Test*"
   "Buffer name used for TextUI views created by the tests.")
 
+(defconst org-other-agenda-test--view-bindings
+  '(("g" . org-other-agenda-refresh)
+    ("/" . org-other-agenda-search)
+    ("\\" . org-other-agenda-clear-search)
+    ("[" . org-other-agenda-previous-day)
+    ("]" . org-other-agenda-next-day)
+    ("n" . org-other-agenda-next-line)
+    ("p" . org-other-agenda-previous-line)
+    ("u" . org-other-agenda-parent)
+    ("m" . org-other-agenda-mark)
+    ("U" . org-other-agenda-unmark-all)
+    ("B" . org-other-agenda-bulk-action)
+    ("<left>" . org-other-agenda-left)
+    ("<right>" . org-other-agenda-right)
+    ("<up>" . org-other-agenda-up)
+    ("<down>" . org-other-agenda-down)
+    ("M-n" . org-other-agenda-next-panel)
+    ("M-p" . org-other-agenda-previous-panel)
+    ("C-v" . org-other-agenda-page-down)
+    ("M-v" . org-other-agenda-page-up)
+    ("<next>" . org-other-agenda-page-down)
+    ("<prior>" . org-other-agenda-page-up)
+    ("TAB" . widget-forward)
+    ("S-TAB" . widget-backward)
+    ("<backtab>" . widget-backward)
+    ("q" . quit-window))
+  "Every view-wide key and its command, including event aliases.")
+
+(defconst org-other-agenda-test--entry-bindings
+  '(("t" . org-other-agenda-todo)
+    ("s" . org-other-agenda-schedule)
+    ("d" . org-other-agenda-deadline)
+    ("," . org-other-agenda-priority)
+    (":" . org-other-agenda-set-tags)
+    ("C-c C-p" . org-other-agenda-toggle-pin)
+    ("S-<left>" . org-other-agenda-date-earlier)
+    ("S-<right>" . org-other-agenda-date-later)
+    ("S-<up>" . org-other-agenda-priority-up)
+    ("S-<down>" . org-other-agenda-priority-down))
+  "Every direct key and command available on an Org heading.")
+
 (defun org-other-agenda-test--cleanup (&optional extra-file)
   "Remove buffers created while testing the fixture in EXTRA-FILE."
   (dolist (name (list org-other-agenda--shadow
@@ -108,13 +149,43 @@ user's global block selection."
                                 :tags-offset 0
                                 :viewport-page-size 40))))
         (with-current-buffer view
-          (setq-local buffer-read-only t))
+          (setq-local buffer-read-only t)
+          (use-local-map
+           (make-composed-keymap org-other-agenda-mode-map
+                                 (current-local-map))))
         view))))
 
 (defun org-other-agenda-test--select-tab (view tab)
   "Select TAB in VIEW and synchronously render it."
   (textui-set-state view :tab tab)
   (textui-refresh view))
+
+(defun org-other-agenda-test--key-command (key &optional position)
+  "Return the command resolved by KEY at optional POSITION."
+  (key-binding (kbd key) nil t position))
+
+(defun org-other-agenda-test--call-key (key &optional position)
+  "Interactively call the command resolved by KEY at optional POSITION."
+  (let ((command (org-other-agenda-test--key-command key position)))
+    (should (commandp command))
+    (call-interactively command)))
+
+(defun org-other-agenda-test--assert-entry-bindings (view title)
+  "Assert every entry binding on TITLE rendered in VIEW."
+  (with-current-buffer view
+    (should (org-other-agenda-test--goto-rendered-entry view title))
+    (dolist (binding org-other-agenda-test--entry-bindings)
+      (should (eq (org-other-agenda-test--key-command (car binding))
+                  (cdr binding))))
+    (should (memq (org-other-agenda-test--key-command "RET")
+                  '(org-other-agenda-entry-visit widget-button-press)))))
+
+(defun org-other-agenda-test--embark-action-entry (type command)
+  "Return TYPE's formatted Embark action entry for COMMAND."
+  (cl-find command
+           (car (embark--formatted-bindings
+                 (embark--raw-action-keymap type)))
+           :key (lambda (entry) (nth 2 entry))))
 
 (defun org-other-agenda-test--widget-count (view)
   "Return the number of materialized TextUI widgets in VIEW."
@@ -198,6 +269,13 @@ user's global block selection."
                          :test #'equal
                          :key (lambda (entry) (plist-get entry :hd))))
 
+(defun org-other-agenda-test--entry-markers-live-p (entry)
+  "Return non-nil when ENTRY's heading and occurrence markers are live."
+  (cl-every (lambda (key)
+              (let ((marker (plist-get entry key)))
+                (and (markerp marker) (marker-buffer marker))))
+            '(:hd :org-marker)))
+
 (defun org-other-agenda-test--timed-entry-p (entry titles)
   "Return non-nil when ENTRY is a target timed item on the pinned day."
   (and (eq (plist-get entry :type) 'agenda)
@@ -275,28 +353,223 @@ user's global block selection."
           (should-not (eq (key-binding (kbd "t")) #'org-other-agenda-todo))
           (should buffer-read-only))))))
 
-(ert-deftest org-other-agenda-test-mode-map-reserves-movement-keys ()
-  "The local map owns movement while actions and native line movement inherit."
-  (dolist (key '("t" "s" "d" "," ":" "C-n" "C-p"))
-    (should-not (lookup-key org-other-agenda-mode-map (kbd key))))
-  (dolist (binding '(("<left>" . org-other-agenda-left)
-                     ("<right>" . org-other-agenda-right)
-                     ("<up>" . org-other-agenda-up)
-                     ("<down>" . org-other-agenda-down)
-                     ("M-n" . org-other-agenda-next-panel)
-                     ("M-p" . org-other-agenda-previous-panel)
-                     ("m" . org-other-agenda-mark)
-                     ("U" . org-other-agenda-unmark-all)
-                     ("B" . org-other-agenda-bulk-action)))
-    (should (eq (lookup-key org-other-agenda-mode-map (kbd (car binding)))
+(ert-deftest org-other-agenda-test-complete-key-contract-resolves ()
+  "Every supported key resolves in its declared scope."
+  (dolist (binding org-other-agenda-test--view-bindings)
+    (should (eq (keymap-lookup org-other-agenda-view-map (car binding))
+                (cdr binding)))
+    (should (eq (keymap-lookup org-other-agenda-mode-map (car binding))
                 (cdr binding))))
+  (dolist (binding org-other-agenda-test--entry-bindings)
+    (should (eq (keymap-lookup org-other-agenda-entry-map (car binding))
+                (cdr binding))))
+  (should (eq (keymap-lookup org-other-agenda-entry-map "RET")
+              #'widget-button-press))
+  (should (eq (keymap-lookup org-other-agenda-entry-map "<down-mouse-1>")
+              #'widget-button-click))
+  (should (eq (keymap-lookup org-other-agenda-entry-cell-map "RET")
+              #'org-other-agenda-entry-visit))
+  (dolist (binding '(("m" . org-other-agenda-mark-day)
+                     ("s" . org-other-agenda-schedule-set-here)))
+    (should (eq (keymap-lookup org-other-agenda-day-map (car binding))
+                (cdr binding))))
+  (should (eq (keymap-lookup org-other-agenda-slot-map "s")
+              #'org-other-agenda-schedule-set-here))
+  (dolist (key '("t" "s" "d" "," ":" "C-n" "C-p" "C-f" "C-b"))
+    (should-not (keymap-lookup org-other-agenda-mode-map key)))
   (dolist (key '("S-<left>" "S-<right>" "S-<up>" "S-<down>"
                  "M-<left>" "M-<right>" "M-<up>" "M-<down>"))
-    (should-not (lookup-key org-other-agenda-mode-map (kbd key))))
+    (should-not (keymap-lookup org-other-agenda-mode-map key)))
   (dotimes (index 6)
-    (should (commandp (lookup-key org-other-agenda-mode-map
-                                  (kbd (number-to-string (1+ index)))))))
-  (should-not (lookup-key org-other-agenda-mode-map (kbd "7"))))
+    (should (commandp (keymap-lookup org-other-agenda-mode-map
+                                     (number-to-string (1+ index))))))
+  (should-not (keymap-lookup org-other-agenda-mode-map "7")))
+
+(ert-deftest org-other-agenda-test-entry-keys-resolve-on-every-page ()
+  "All entry keys resolve on Today, Week, and every list page."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (dolist (surface '((agenda . "Monday standup")
+                           (day . "Design review")
+                           (week . "Monday standup")
+                           (someday . "Read the RFC")))
+          (org-other-agenda-test--select-tab view (car surface))
+          (org-other-agenda-test--assert-entry-bindings view (cdr surface)))
+        (with-current-buffer view
+          (org-other-agenda-search "invitations")
+          (textui-refresh view))
+        (org-other-agenda-test--assert-entry-bindings
+         view "Prepare the launch checklist")
+        (with-current-buffer view
+          (org-other-agenda-search "#build")
+          (textui-refresh view))
+        (org-other-agenda-test--assert-entry-bindings
+         view "Draft the migration plan")))))
+
+(ert-deftest org-other-agenda-test-all-keys-dispatch-in-rendered-contexts ()
+  "Every key invokes its command from a real rendered noun."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "Monday standup"))
+          (dolist (binding (append org-other-agenda-test--view-bindings
+                                   org-other-agenda-test--entry-bindings))
+            (let ((key (car binding))
+                  (command (cdr binding))
+                  called)
+              (should (eq (org-other-agenda-test--key-command key) command))
+              (cl-letf (((symbol-function command)
+                         (lambda ()
+                           (interactive)
+                           (setq called t))))
+                (org-other-agenda-test--call-key key))
+              (should called)))
+          (goto-char (point-min))
+          (should (search-forward "Monday standup" nil t))
+          (goto-char (1- (point)))
+          (let ((button-position (point))
+                visited)
+            (should (eq (org-other-agenda-test--key-command
+                         "<down-mouse-1>" button-position)
+                        #'widget-button-click))
+            (should (eq (org-other-agenda-test--key-command
+                         "RET" button-position)
+                        #'widget-button-press))
+            (cl-letf (((symbol-function 'org-other-agenda-visit)
+                       (lambda (heading &optional _event)
+                         (setq visited heading))))
+              (org-other-agenda-test--call-key "RET" button-position))
+            (should (markerp visited)))
+          (beginning-of-line)
+          (should (eq (org-other-agenda-test--key-command "RET")
+                      #'org-other-agenda-entry-visit))
+          (let (visited)
+            (cl-letf (((symbol-function 'org-other-agenda-entry-visit)
+                       (lambda ()
+                         (interactive)
+                         (setq visited t))))
+              (org-other-agenda-test--call-key "RET"))
+            (should visited)))
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (goto-char (org-other-agenda--position-for-place
+                      '(day-calendar 3 2)))
+          (dolist (binding '(("m" . org-other-agenda-mark-day)
+                             ("s" . org-other-agenda-schedule-set-here)))
+            (let ((command (cdr binding)) called)
+              (should (eq (org-other-agenda-test--key-command (car binding))
+                          command))
+              (cl-letf (((symbol-function command)
+                         (lambda ()
+                           (interactive)
+                           (setq called t))))
+                (org-other-agenda-test--call-key (car binding)))
+              (should called)))
+          (goto-char (org-other-agenda--position-for-place
+                      '(day-timeblock 0 3)))
+          (dolist (binding '(("s" . org-other-agenda-schedule-set-here)
+                             ("m" . org-other-agenda-mark)
+                             ("u" . org-other-agenda-parent)))
+            (let ((command (cdr binding)) called)
+              (should (eq (org-other-agenda-test--key-command (car binding))
+                          command))
+              (cl-letf (((symbol-function command)
+                         (lambda ()
+                           (interactive)
+                           (setq called t))))
+                (org-other-agenda-test--call-key (car binding)))
+              (should called)))
+          (cl-loop for key from 1 to 6
+                   for tab in '(day week agenda someday search tags)
+                   do (org-other-agenda-test--call-key
+                       (number-to-string key))
+                   do (should (eq (plist-get textui-state :tab) tab))))))))
+
+(ert-deftest org-other-agenda-test-all-entry-action-keys-forward-to-org ()
+  "Every entry action key reaches its corresponding native Org command."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (dolist (spec '(("t" org-other-agenda-todo org-agenda-todo)
+                        ("s" org-other-agenda-schedule org-agenda-schedule)
+                        ("d" org-other-agenda-deadline org-agenda-deadline)
+                        ("," org-other-agenda-priority org-agenda-priority)
+                        (":" org-other-agenda-set-tags org-agenda-set-tags)
+                        ("S-<left>" org-other-agenda-date-earlier
+                         org-agenda-do-date-earlier)
+                        ("S-<right>" org-other-agenda-date-later
+                         org-agenda-do-date-later)
+                        ("S-<up>" org-other-agenda-priority-up
+                         org-agenda-priority-up)
+                        ("S-<down>" org-other-agenda-priority-down
+                         org-agenda-priority-down)))
+          (org-other-agenda-test--select-tab view 'agenda)
+          (with-current-buffer view
+            (should (org-other-agenda-test--goto-rendered-entry
+                     view "Monday standup"))
+            (let ((key (nth 0 spec))
+                  (command (nth 1 spec))
+                  (native (nth 2 spec))
+                  called)
+              (should (eq (org-other-agenda-test--key-command key) command))
+              (cl-letf (((symbol-function native)
+                         (lambda ()
+                           (interactive)
+                           (setq called t))))
+                (org-other-agenda-test--call-key key))
+              (should called))))))))
+
+(ert-deftest org-other-agenda-test-view-state-and-widget-keys-take-effect ()
+  "Date, paging, tab, and widget keys change their intended view state."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (setq textui-state
+                (plist-put textui-state :date org-other-agenda-test--today))
+          (org-other-agenda-test--call-key "]")
+          (should (= (1+ org-other-agenda-test--today)
+                     (plist-get textui-state :date)))
+          (org-other-agenda-test--call-key "[")
+          (should (= org-other-agenda-test--today
+                     (plist-get textui-state :date))))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (setq textui-state (plist-put textui-state :agenda-offset 0))
+          (textui-refresh view)
+          (let ((step (max 1 (1- (org-other-agenda--viewport-page-size
+                                  'agenda)))))
+            (org-other-agenda-test--call-key "C-v")
+            (should (= step (plist-get textui-state :agenda-offset)))
+            (org-other-agenda-test--call-key "M-v")
+            (should (= 0 (plist-get textui-state :agenda-offset)))
+            (org-other-agenda-test--call-key "<next>")
+            (should (= step (plist-get textui-state :agenda-offset)))
+            (org-other-agenda-test--call-key "<prior>")
+            (should (= 0 (plist-get textui-state :agenda-offset))))
+          (goto-char (point-min))
+          (org-other-agenda-test--call-key "TAB")
+          (let ((first (point)))
+            (should (widget-at first))
+            (org-other-agenda-test--call-key "TAB")
+            (let ((second (point)))
+              (should (widget-at second))
+              (should (/= first second))
+              (org-other-agenda-test--call-key "S-TAB")
+              (should (= first (point)))
+              (org-other-agenda-test--call-key "TAB")
+              (should (= second (point)))
+              (org-other-agenda-test--call-key "<backtab>")
+              (should (= first (point))))))))))
 
 (ert-deftest org-other-agenda-test-entry-movement-crosses-rows ()
   "n and p move between the first two rendered entry rows."
@@ -530,15 +803,17 @@ user's global block selection."
               (goto-char (point-min))
               (should (search-forward "Monday standup" nil t))
               (beginning-of-line)
-              (let* ((target (org-other-agenda-embark-target))
-                     (title (nth 1 target))
+              (let* ((target-info (car (embark--targets)))
+                     (title (plist-get target-info :target))
                      (marker (get-text-property 0 'org-marker title))
-                     (target-info
-                      (list :type 'org-heading
-                            :target title
-                            :bounds (cddr target))))
+                     (bounds (plist-get target-info :bounds)))
+                (should (eq (plist-get target-info :type) 'org-heading))
+                (should (consp bounds))
                 (should (eq (keymap-lookup embark-org-heading-map "t")
                             #'org-todo))
+                (should (eq (get-text-property
+                             0 'org-other-agenda-origin title)
+                            view))
                 (org-with-point-at marker
                   (org-todo 'done))
                 (embark--run-action-hooks embark-post-action-hooks
@@ -554,6 +829,31 @@ user's global block selection."
                   (should (string-match-p "DONE" line)))))))
       (when (file-exists-p copy)
         (delete-file copy)))))
+
+(ert-deftest org-other-agenda-test-embark-refresh-requires-live-board-origin ()
+  "Embark heading actions refresh only targets created by a live board."
+  (org-other-agenda-test--with-fixture
+    (let* ((view (org-other-agenda-test--open-view))
+           (marker
+            (with-current-buffer view
+              (plist-get (car (plist-get textui-state :base-entries)) :hd)))
+           (external-target (propertize "External heading" 'org-marker marker))
+           (dead-view (generate-new-buffer " *org-other-agenda-dead-origin*"))
+           (dead-target
+            (propertize "Dead board heading"
+                        'org-marker marker
+                        'org-other-agenda-origin dead-view))
+           refreshed)
+      (kill-buffer dead-view)
+      (cl-letf (((symbol-function 'org-other-agenda-refresh)
+                 (lambda ()
+                   (push (current-buffer) refreshed))))
+        (dolist (target (list external-target dead-target))
+          (embark--run-action-hooks
+           embark-post-action-hooks 'org-todo
+           (list :type 'org-heading :target target :bounds nil)
+           nil)))
+      (should-not refreshed))))
 
 (ert-deftest org-other-agenda-test-embark-finder-targets-today-timed-row ()
   "A Today time block resolves to its own Org heading marker."
@@ -581,6 +881,85 @@ user's global block selection."
       (let ((view (org-other-agenda-test--open-view)))
         (org-other-agenda-test--assert-rendered-target
          view 'day "1:1 with the designer" "1:1 with the designer")))))
+
+(ert-deftest org-other-agenda-test-pin-is-a-conditional-heading-action ()
+  "Direct, Embark, and widget paths share the conditional pin action."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)) heading)
+        (set-window-buffer (selected-window) view)
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "1:1 with the designer"))
+          (setq heading (org-other-agenda--at-point))
+          (should (eq (org-other-agenda--pin-state heading) 'pin))
+          (should (equal (org-other-agenda--pin-action-label)
+                         "Pin to Today main lane"))
+          (should (eq (keymap-lookup embark-org-heading-map "C-c C-p")
+                      #'org-other-agenda-toggle-pin))
+          (should (eq (keymap-lookup
+                       (embark--raw-action-keymap 'org-heading) "C-c C-p")
+                      #'org-other-agenda-toggle-pin))
+          (let ((action
+                 (org-other-agenda-test--embark-action-entry
+                  'org-heading #'org-other-agenda-toggle-pin)))
+            (should action)
+            (should (equal (nth 1 action) "Pin to Today main lane")))
+          (should (eq (org-other-agenda-test--key-command "C-c C-p")
+                      #'org-other-agenda-toggle-pin))
+          (org-other-agenda-test--call-key "C-c C-p")
+          (should (eq (org-other-agenda--pin-state heading) 'unpin))
+          (should (org-other-agenda--same-marker-location-p
+                   heading (org-other-agenda--at-point)))
+          (should (equal (org-other-agenda--pin-action-label)
+                         "Unpin from Today main lane"))
+          (should (equal
+                   (nth 1 (org-other-agenda-test--embark-action-entry
+                           'org-heading #'org-other-agenda-toggle-pin))
+                   "Unpin from Today main lane"))
+          (let ((target (car (embark--targets))))
+            (should (eq (plist-get target :type) 'org-heading))
+            (embark--act #'org-other-agenda-toggle-pin target nil))
+          (should (eq (org-other-agenda--pin-state heading) 'pin))
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "1:1 with the designer"))
+          (should (widget-at (point)))
+          (should (eq (org-other-agenda-test--key-command "RET")
+                      #'widget-button-press))
+          (org-other-agenda-test--call-key "RET")
+          (should (eq (org-other-agenda--pin-state heading) 'unpin))
+          (org-other-agenda-refresh)
+          (textui-refresh view)
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "1:1 with the designer"))
+          (setq heading (org-other-agenda--at-point))
+          (should (eq (org-other-agenda--pin-state heading) 'unpin)))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "Monday standup"))
+          (let ((before (plist-get textui-state :pinned)))
+            (should-not (org-other-agenda--pin-state))
+            (should-not (keymap-lookup embark-org-heading-map "C-c C-p"))
+            (should-not (keymap-lookup
+                         (embark--raw-action-keymap 'org-heading)
+                         "C-c C-p"))
+            (should-not (org-other-agenda-test--embark-action-entry
+                         'org-heading #'org-other-agenda-toggle-pin))
+            (should-error (org-other-agenda-toggle-pin) :type 'user-error)
+            (should (eq before (plist-get textui-state :pinned)))))
+        (with-current-buffer (marker-buffer heading)
+          (goto-char heading)
+          (should-not (keymap-lookup embark-org-heading-map
+                                     "C-c C-p"))
+          (should-not (keymap-lookup
+                       (embark--raw-action-keymap 'org-heading) "C-c C-p"))
+          (should-not (org-other-agenda-test--embark-action-entry
+                       'org-heading #'org-other-agenda-toggle-pin))
+          (should-error (org-other-agenda-toggle-pin)
+                        :type 'user-error))))))
 
 (ert-deftest org-other-agenda-test-restores-multi-day-span-dates ()
   "Block metadata reconstructs the quarterly report's four calendar days."
@@ -651,7 +1030,7 @@ user's global block selection."
                                (org-time-string-to-time
                                 (concat "<" org-other-agenda-test--start-day ">"))
                              org-other-agenda-test--start-day))))
-                (org-other-agenda-schedule))
+                (org-other-agenda-test--call-key "s"))
               (textui-refresh view)
               (let* ((entries (plist-get textui-state :base-entries))
                      (someday (cdr (assq 'someday
@@ -708,6 +1087,108 @@ user's global block selection."
         (should (equal (org-other-agenda-test--titles
                         (plist-get textui-state :entries))
                        base-titles))))))
+
+(ert-deftest org-other-agenda-test-query-generations-own-their-markers ()
+  "Query generations preserve live base markers and retire only their own."
+  (org-other-agenda-test--with-fixture
+    (let* ((view (org-other-agenda-test--open-view))
+           (base (with-current-buffer view
+                   (plist-get textui-state :base-entries)))
+           (base-entry (org-other-agenda-test--entry-by-title
+                        base "Monday standup")))
+      (should (cl-every #'org-other-agenda-test--entry-markers-live-p base))
+      (with-current-buffer view
+        (org-other-agenda-search "invitations")
+        (textui-refresh view))
+      (let ((first-query
+             (with-current-buffer view
+               (plist-get textui-state :query-entries))))
+        (should first-query)
+        (should (cl-every #'org-other-agenda-test--entry-markers-live-p base))
+        (should (cl-every #'org-other-agenda-test--entry-markers-live-p
+                          first-query))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "Monday standup"))
+          (let (forwarded-marker)
+            (cl-letf (((symbol-function 'org-agenda-todo)
+                       (lambda ()
+                         (interactive)
+                         (setq forwarded-marker
+                               (org-get-at-bol 'org-hd-marker)))))
+              (org-other-agenda-todo))
+            (should (equal forwarded-marker (plist-get base-entry :hd)))))
+        (with-current-buffer view
+          (org-other-agenda-search "#build")
+          (textui-refresh view))
+        (let ((second-query
+               (with-current-buffer view
+                 (plist-get textui-state :query-entries))))
+          (should second-query)
+          (should (cl-every #'org-other-agenda-test--entry-markers-live-p base))
+          (should-not (cl-some #'org-other-agenda-test--entry-markers-live-p
+                               first-query))
+          (should (cl-every #'org-other-agenda-test--entry-markers-live-p
+                            second-query))
+          (with-current-buffer view
+            (org-other-agenda-clear-search))
+          (should (cl-every #'org-other-agenda-test--entry-markers-live-p base))
+          (with-current-buffer view
+            (org-other-agenda-search "invitations")
+            (textui-refresh view))
+          (let ((query-count
+                 (with-current-buffer org-other-agenda--query-shadow
+                   (length org-other-agenda--owned-markers))))
+            (with-current-buffer view
+              (org-other-agenda-search "invitations")
+              (textui-refresh view))
+            (should (= query-count
+                       (with-current-buffer org-other-agenda--query-shadow
+                         (length org-other-agenda--owned-markers)))))
+          (let ((query-before-refresh
+                 (with-current-buffer view
+                   (plist-get textui-state :query-entries))))
+            (should query-before-refresh)
+            (with-current-buffer view
+              (org-other-agenda-refresh)
+              (textui-refresh view))
+            (with-current-buffer view
+              (should (plist-get textui-state :base-entries))
+              (should (plist-get textui-state :query-entries))
+              (should-not
+               (cl-some #'org-other-agenda-test--entry-markers-live-p base))
+              (should-not
+               (cl-some #'org-other-agenda-test--entry-markers-live-p
+                        query-before-refresh))
+              (should
+               (cl-every #'org-other-agenda-test--entry-markers-live-p
+                         (plist-get textui-state :base-entries)))
+              (should
+               (cl-every #'org-other-agenda-test--entry-markers-live-p
+                         (plist-get textui-state :query-entries))))))))))
+
+(ert-deftest org-other-agenda-test-shadow-generation-preserves-external-markers ()
+  "Shadow generations do not reset markers owned by external Org agendas."
+  (org-other-agenda-test--with-fixture
+    (let ((buffer (generate-new-buffer " *org-other-agenda-external-marker*"))
+          marker)
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (insert "external")
+              (goto-char (point-min))
+              (let ((org-agenda-buffer nil))
+                (setq marker (org-agenda-new-marker))))
+            (let ((view (org-other-agenda-test--open-view)))
+              (should (marker-buffer marker))
+              (with-current-buffer view
+                (org-other-agenda-search "invitations")
+                (org-other-agenda-refresh))
+              (should (marker-buffer marker))))
+        (setq org-agenda-markers (delq marker org-agenda-markers))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest org-other-agenda-test-viewport-scales-with-window-not-entry-count ()
   "Agenda and Today materialize similar widget counts for large and small lists."
@@ -1058,6 +1539,67 @@ so this regression needs its own file."
                         #'org-other-agenda-schedule-set-here))
             (should-not (keymap-lookup org-other-agenda-day-map "g"))))))))
 
+(ert-deftest org-other-agenda-test-embark-selected-noun-reaches-action ()
+  "Embark passes the selected nested noun to its action and unwinds it."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((view (org-other-agenda-test--open-view)))
+        (set-window-buffer (selected-window) view)
+        (cl-labels
+            ((destination
+              (target)
+              (let (seen)
+                (cl-letf
+                    (((symbol-function 'org-other-agenda-schedule-set-here)
+                      (lambda ()
+                        (interactive)
+                        (setq seen (org-other-agenda--schedule-target nil)))))
+                  (embark--act #'org-other-agenda-schedule-set-here
+                               target nil))
+                (should-not org-other-agenda--embark-selected-target)
+                seen)))
+          (org-other-agenda-test--select-tab view 'day)
+          (with-current-buffer view
+            (should (org-other-agenda-test--goto-rendered-entry
+                     view "Design review"))
+            (let* ((targets (embark--targets))
+                   (slot (cl-find 'ooa-slot targets
+                                  :key (lambda (candidate)
+                                         (plist-get candidate :type))))
+                   (day (cl-find 'ooa-day targets
+                                 :key (lambda (candidate)
+                                        (plist-get candidate :type))))
+                   (slot-value (get-text-property
+                                0 'ooa-slot (plist-get slot :target)))
+                   (day-value (get-text-property
+                               0 'ooa-day (plist-get day :target))))
+              (should (equal (destination slot) slot-value))
+              (should (equal (destination day)
+                             (list day-value nil nil)))
+              (should (equal (org-other-agenda--schedule-target nil)
+                             slot-value)))
+            (goto-char (org-other-agenda--position-for-place
+                        '(day-timeblock 0 3)))
+            (let* ((targets (embark--targets))
+                   (slot (cl-find 'ooa-slot targets
+                                  :key (lambda (candidate)
+                                         (plist-get candidate :type))))
+                   (slot-value (get-text-property
+                                0 'ooa-slot (plist-get slot :target))))
+              (should (equal (destination slot) slot-value))))
+          (org-other-agenda-test--select-tab view 'week)
+          (with-current-buffer view
+            (should (org-other-agenda-test--goto-rendered-entry
+                     view "Monday standup"))
+            (let* ((day (cl-find 'ooa-day (embark--targets)
+                                 :key (lambda (candidate)
+                                        (plist-get candidate :type))))
+                   (day-value (get-text-property
+                               0 'ooa-day (plist-get day :target))))
+              (should (equal (destination day)
+                             (list day-value nil nil))))))))))
+
 (ert-deftest org-other-agenda-test-day-targets-cover-three-surfaces ()
   "Today calendar, Week headings and Agenda headers expose `ooa-day'."
   (org-other-agenda-test--with-fixture
@@ -1181,7 +1723,7 @@ so this regression needs its own file."
                 (should (org-other-agenda-test--goto-rendered-entry
                          view "Move me"))
                 (should (= 3 (nth 1 (org-other-agenda--place-at-point))))
-                (org-other-agenda-date-later)
+                (org-other-agenda-test--call-key "S-<right>")
                 (should (= 4 (nth 1 (org-other-agenda--place-at-point))))
                 (with-current-buffer
                     (marker-buffer (org-other-agenda--at-point))
@@ -1337,16 +1879,16 @@ so this regression needs its own file."
               (with-current-buffer view
                 (goto-char (org-other-agenda--position-for-place
                             '(week-days 3 0)))
-                (org-other-agenda-mark)
+                (org-other-agenda-test--call-key "m")
                 (goto-char (org-other-agenda--position-for-place
                             '(week-days 4 1)))
-                (org-other-agenda-mark)
+                (org-other-agenda-test--call-key "m")
                 (should (= 4 (length (org-other-agenda--marked-headings))))
                 (cl-letf (((symbol-function 'read-char-exclusive)
                            (lambda (&rest _arguments) ?t))
                           ((symbol-function 'completing-read)
                            (lambda (&rest _arguments) "DONE")))
-                  (org-other-agenda-bulk-action))
+                  (org-other-agenda-test--call-key "B"))
                 (should-not (org-other-agenda--marked-headings)))
               (with-current-buffer (find-file-noselect file)
                 (goto-char (point-min))
@@ -1406,14 +1948,14 @@ so this regression needs its own file."
               (with-current-buffer view
                 (should (org-other-agenda-test--goto-rendered-entry
                          view "Put me here"))
-                (org-other-agenda-mark))
+                (org-other-agenda-test--call-key "m"))
               (org-other-agenda-test--select-tab view 'day)
               (with-current-buffer view
                 (goto-char (org-other-agenda--position-for-place
                             '(day-timeblock 0 3)))
                 (should (eq (key-binding (kbd "s"))
                             #'org-other-agenda-schedule-set-here))
-                (org-other-agenda-schedule-set-here)
+                (org-other-agenda-test--call-key "s")
                 (should-not (org-other-agenda--marked-headings)))
               (with-current-buffer (find-file-noselect file)
                 (goto-char (point-min))
@@ -1421,6 +1963,90 @@ so this regression needs its own file."
                          "SCHEDULED: <2026-08-20 Thu 09:30>" nil t)))))
       (when (file-exists-p file)
         (delete-file file))))))
+
+(ert-deftest org-other-agenda-test-embark-selected-day-overrides-point-slot ()
+  "An Embark day action on an occupied slot schedules without a time."
+  (let ((file (make-temp-file "org-other-agenda-embark-day-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* TODO Occupied slot\n"
+                    "  SCHEDULED: <2026-08-20 Thu 09:00-10:00>\n\n"
+                    "* TODO Put me on the selected day\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (set-window-buffer (selected-window) view)
+              (org-other-agenda-test--select-tab view 'someday)
+              (with-current-buffer view
+                (should (org-other-agenda-test--goto-rendered-entry
+                         view "Put me on the selected day"))
+                (org-other-agenda-mark))
+              (org-other-agenda-test--select-tab view 'day)
+              (with-current-buffer view
+                (should (org-other-agenda-test--goto-rendered-entry
+                         view "Occupied slot"))
+                (let ((target
+                       (cl-find 'ooa-day (embark--targets)
+                                :key (lambda (candidate)
+                                       (plist-get candidate :type)))))
+                  (should target)
+                  (should (equal
+                           (org-other-agenda--schedule-target
+                            (plist-get target :target))
+                           (list org-other-agenda-test--today nil nil)))
+                  (should (equal (org-other-agenda--schedule-target nil)
+                                 (list org-other-agenda-test--today
+                                       (* 9 60) (+ (* 9 60) 30))))
+                  (embark--act #'org-other-agenda-schedule-set-here
+                               target nil)))
+              (with-current-buffer (find-file-noselect file)
+                (goto-char (point-min))
+                (should (search-forward
+                         "SCHEDULED: <2026-08-20 Thu>" nil t))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-day-key-schedules-marked-heading ()
+  "The day-local s key schedules a marked heading without a time."
+  (let ((file (make-temp-file "org-other-agenda-day-key-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n* TODO Put me on this day\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'someday)
+              (with-current-buffer view
+                (should (org-other-agenda-test--goto-rendered-entry
+                         view "Put me on this day"))
+                (org-other-agenda-test--call-key "m"))
+              (org-other-agenda-test--select-tab view 'day)
+              (with-current-buffer view
+                (goto-char (point-min))
+                (let (day-position)
+                  (while (and (< (point) (point-max)) (null day-position))
+                    (when (equal
+                           (get-text-property
+                            (point) 'org-other-agenda-object)
+                           (cons 'ooa-day org-other-agenda-test--today))
+                      (setq day-position (point)))
+                    (goto-char
+                     (or (next-single-property-change
+                          (point) 'org-other-agenda-object nil (point-max))
+                         (point-max))))
+                  (should day-position)
+                  (goto-char day-position))
+                (should (eq (org-other-agenda-test--key-command "s")
+                            #'org-other-agenda-schedule-set-here))
+                (org-other-agenda-test--call-key "s")
+                (should-not (org-other-agenda--marked-headings)))
+              (with-current-buffer (find-file-noselect file)
+                (goto-char (point-min))
+                (should (search-forward
+                         "SCHEDULED: <2026-08-20 Thu>" nil t))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
 
 (ert-deftest org-other-agenda-test-schedule-set-continues-after-failure ()
   "Schedule-set removes successes, retains failures, and reports both."

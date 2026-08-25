@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 chenyibin
 
 ;; Author: chenyibin
-;; Version: 0.1.0
+;; Version: 0.1.1
 ;; Package-Requires: ((emacs "29.1") (textui "0.5.1") (embark "1.2"))
 ;; Keywords: calendar, outlines, convenience
 ;; URL: https://github.com/yibie/org-other-agenda
@@ -44,6 +44,8 @@
 (defvar org-other-agenda-series)
 (defvar-local org-other-agenda--view nil
   "Non-nil in a TextUI buffer rendered by `org-other-agenda'.")
+(defvar-local org-other-agenda--owned-markers nil
+  "Org agenda markers owned by this hidden agenda generation.")
 (defvar-local org-other-agenda--movement-scrolled nil
   "Non-nil when entry movement already scrolled the current viewport.")
 (defvar org-other-agenda-entry-map)
@@ -53,6 +55,8 @@
 (defvar org-other-agenda-view-map)
 (defvar org-other-agenda--day-direct-map)
 (defvar org-other-agenda--slot-direct-map)
+(defvar org-other-agenda--embark-selected-target nil
+  "Embark target dynamically bound while a board noun action runs.")
 
 (defmacro org-other-agenda--with-shadow-agenda (buffer prefix &rest body)
   "Run BODY in agenda BUFFER with native hidden-agenda bindings.
@@ -97,12 +101,23 @@ receives the remainder exactly as Org expects it."
 (defun org-other-agenda--run-series (series buffer-name)
   "Generate `SERIES' in the hidden agenda buffer `BUFFER-NAME'."
   (when series
-    (org-other-agenda--with-shadow-agenda
-        (get-buffer-create buffer-name) nil
-      (catch 'exit
-        (org-agenda-run-series
-         "org-other-agenda"
-         (list series org-other-agenda-series))))))
+    (let ((buffer (get-buffer-create buffer-name)))
+      (with-current-buffer buffer
+        ;; Non-sticky Org agendas share the global marker registry.  Restore
+        ;; this shadow's registry dynamically so generating one shadow cannot
+        ;; reset another shadow's markers or markers owned by native Org.
+        (let ((org-agenda-markers org-other-agenda--owned-markers)
+              (org-agenda-buffer buffer))
+          (unwind-protect
+              (org-other-agenda--with-shadow-agenda buffer nil
+                (catch 'exit
+                  (org-agenda-run-series
+                   "org-other-agenda"
+                   (list series org-other-agenda-series))))
+            ;; `org-agenda-mode' clears ordinary buffer-local variables while
+            ;; preparing the buffer, so restore ownership after Org returns.
+            (setq-local org-other-agenda--owned-markers
+                        org-agenda-markers)))))))
 
 (defun org-other-agenda--generate (&optional start-day query-only)
   "Generate a hidden agenda buffer.
@@ -601,7 +616,10 @@ which is the location contract used by `embark-org-heading-map'."
       (when (and hd (buffer-live-p (marker-buffer hd)))
         (let ((title (org-other-agenda--embark-title hd)))
           (when (stringp title)
-            `(org-heading ,(propertize title 'org-marker hd)
+            `(org-heading ,(propertize
+                            title
+                            'org-marker hd
+                            'org-other-agenda-origin (current-buffer))
                           ,(line-beginning-position) . ,(line-end-position))))))))
 
 (defun org-other-agenda--noun-object-at-point (type)
@@ -613,8 +631,9 @@ which is the location contract used by `embark-org-heading-map'."
 
 (defun org-other-agenda--noun-value (target type)
   "Return TYPE's payload from Embark TARGET or the noun at point."
-  (or (and (stringp target) (get-text-property 0 type target))
-      (cdr-safe (org-other-agenda--noun-object-at-point type))))
+  (if (stringp target)
+      (get-text-property 0 type target)
+    (cdr-safe (org-other-agenda--noun-object-at-point type))))
 
 (defun org-other-agenda--embark-noun-target (type)
   "Return an Embark target of TYPE from renderer-owned noun metadata."
@@ -1117,12 +1136,7 @@ The page contains a day-list header, multi-day bars, and daily entries.
   :button-prefix "" :button-suffix "" :format "%[%v%]"
   :value-create (lambda (w) (insert (widget-value w)))
   :action (lambda (w &optional _e)
-            (let ((hd (widget-get w :cool-hd)))
-              (textui-set-state
-               (current-buffer) :pinned
-               (lambda (cur) (if (member hd cur)
-                                 (delete hd (copy-sequence cur))
-                               (cons hd cur)))))))
+            (org-other-agenda-toggle-pin (widget-get w :cool-hd))))
 
 (defface org-other-agenda-query
   '((((background dark)) (:foreground "#D6A65C")) (t (:foreground "#9C6212")))
@@ -1961,6 +1975,74 @@ RIGHT-BUFFER."
      (org-other-agenda--same-marker-location-p
       hd (org-other-agenda--object-hd position)))))
 
+(defun org-other-agenda--pin-heading (&optional target)
+  "Return the heading marker represented by TARGET or point."
+  (let ((target (or target org-other-agenda--embark-selected-target)))
+    (cond
+     ((markerp target) target)
+     ((stringp target) (get-text-property 0 'org-marker target))
+     (t (condition-case nil
+            (org-other-agenda--at-point)
+          (user-error nil))))))
+
+(defun org-other-agenda--pin-state (&optional heading)
+  "Return `pin' or `unpin' when HEADING supports that Today action."
+  (when (and org-other-agenda--view
+             (derived-mode-p 'textui-mode)
+             (eq (plist-get textui-state :tab) 'day))
+    (when-let* ((heading (org-other-agenda--pin-heading heading)))
+      (cond
+       ((cl-some
+         (lambda (pinned)
+           (org-other-agenda--same-marker-location-p heading pinned))
+         (plist-get textui-state :pinned))
+        'unpin)
+       ((cl-some
+         (lambda (block)
+           (org-other-agenda--same-marker-location-p
+            heading (plist-get block :hd)))
+         (plist-get textui-state :day-overflow))
+        'pin)))))
+
+(defun org-other-agenda--pin-action-filter (binding)
+  "Return BINDING only when point supports the Today pin action."
+  (and (org-other-agenda--pin-state) binding))
+
+(defun org-other-agenda--pin-action-label ()
+  "Return the context-sensitive label for the Today pin action."
+  (if (eq (org-other-agenda--pin-state) 'unpin)
+      "Unpin from Today main lane"
+    "Pin to Today main lane"))
+
+(defun org-other-agenda-toggle-pin (&optional heading)
+  "Toggle Today main-lane pinning for rendered HEADING.
+
+HEADING may be a source marker supplied by the overflow widget.  During an
+Embark action, the selected `org-heading' target supplies it dynamically."
+  (interactive)
+  (let* ((view (current-buffer))
+         (heading (org-other-agenda--pin-heading heading))
+         (state (and heading (org-other-agenda--pin-state heading))))
+    (unless state
+      (user-error "No pinnable Today heading at point"))
+    (let ((pinned (plist-get textui-state :pinned)))
+      (setq pinned
+            (if (eq state 'unpin)
+                (cl-remove-if
+                 (lambda (candidate)
+                   (org-other-agenda--same-marker-location-p
+                    heading candidate))
+                 pinned)
+              (cons (copy-marker heading nil) pinned)))
+      (textui-set-state view :pinned pinned))
+    (textui-refresh view)
+    (when-let* ((position (org-other-agenda--position-for-heading heading)))
+      (goto-char position)
+      (org-other-agenda--update-current-feedback))
+    (message "%s %s"
+             (if (eq state 'unpin) "Unpinned" "Pinned")
+             (org-other-agenda--heading-title heading))))
+
 (defun org-other-agenda--forward-occurrence (command)
   "Run native agenda COMMAND on the exact rendered source occurrence."
   (let* ((view (current-buffer))
@@ -2069,6 +2151,7 @@ RIGHT-BUFFER."
     (define-key map [next] #'org-other-agenda-page-down)
     (define-key map [prior] #'org-other-agenda-page-up)
     (define-key map (kbd "TAB") #'widget-forward)
+    (define-key map (kbd "S-TAB") #'widget-backward)
     (define-key map (kbd "<backtab>") #'widget-backward)
     (define-key map (kbd "q") #'quit-window)
     (dotimes (i 6)
@@ -2119,6 +2202,7 @@ RIGHT-BUFFER."
     (define-key map (kbd "d") #'org-other-agenda-deadline)
     (define-key map (kbd ",") #'org-other-agenda-priority)
     (define-key map (kbd ":") #'org-other-agenda-set-tags)
+    (define-key map (kbd "C-c C-p") #'org-other-agenda-toggle-pin)
     (define-key map (kbd "S-<left>") #'org-other-agenda-date-earlier)
     (define-key map (kbd "S-<right>") #'org-other-agenda-date-later)
     (define-key map (kbd "S-<up>") #'org-other-agenda-priority-up)
@@ -2590,9 +2674,18 @@ rectangle gesture, leaving the single-heading toggle unchanged."
 
 (defun org-other-agenda--schedule-target (target)
   "Return `(DAY START END)' represented by Embark TARGET or point."
-  (or (org-other-agenda--noun-value target 'ooa-slot)
-      (when-let* ((day (org-other-agenda--noun-value target 'ooa-day)))
-        (list day nil nil))))
+  (let ((target (or target org-other-agenda--embark-selected-target)))
+    (or (org-other-agenda--noun-value target 'ooa-slot)
+        (when-let* ((day (org-other-agenda--noun-value target 'ooa-day)))
+          (list day nil nil)))))
+
+(cl-defun org-other-agenda--with-embark-selected-target
+    (&rest arguments &key run target &allow-other-keys)
+  "Call RUN with Embark TARGET available to the board action.
+
+ARGUMENTS are the around-action hook arguments supplied by Embark."
+  (let ((org-other-agenda--embark-selected-target target))
+    (apply run arguments)))
 
 (defun org-other-agenda--schedule-time (day start)
   "Return an Org date string for absolute DAY and optional START minutes."
@@ -3002,25 +3095,23 @@ removed from the set; failures remain marked and are summarized."
     (message "Refreshed")))
 
 (cl-defun org-other-agenda--embark-refresh
-    (&key type target &allow-other-keys)
-  "Refresh board views after Embark acts on `TARGET' of type `TYPE'."
-  (let ((marker (and (eq type 'org-heading)
-                     (stringp target)
+    (&key action type target &allow-other-keys)
+  "Refresh the source board after Embark ACTION on TARGET of TYPE."
+  (let ((view (and (eq type 'org-heading)
+                   (stringp target)
+                   (get-text-property
+                    0 'org-other-agenda-origin target)))
+        (marker (and (stringp target)
                      (get-text-property 0 'org-marker target))))
-    (when (and (markerp marker) (buffer-live-p (marker-buffer marker)))
-      (dolist (view (buffer-list))
-        (when (with-current-buffer view
-                (and org-other-agenda--view
-                     (derived-mode-p 'textui-mode)))
-          ;; Embark runs the Org action at the source marker.  Its post-action
-          ;; hook is the smallest bridge back to this projection: reuse the
-          ;; normal full refresh instead of advising Org or claiming an
-          ;; `org-agenda-mode' parent for the rendered buffer.  The `:always'
-          ;; hook refreshes every board after any action on any marked
-          ;; `org-heading', including non-mutating actions; that cost is
-          ;; accepted for step 1 and may be narrowed later.
-          (with-current-buffer view
-            (org-other-agenda-refresh)))))))
+    (when (and (not (eq action 'org-other-agenda-toggle-pin))
+               (buffer-live-p view)
+               (buffer-local-value 'org-other-agenda--view view)
+               (markerp marker) (buffer-live-p (marker-buffer marker)))
+      ;; Embark runs the Org action at the source marker.  The target's
+      ;; provenance is the smallest bridge back to the projection that
+      ;; created it; external `org-heading' targets carry no such property.
+      (with-current-buffer view
+        (org-other-agenda-refresh)))))
 
 (defun org-other-agenda--regenerate-view (view)
   "Regenerate only the active query and update TextUI `VIEW'."
@@ -3112,6 +3203,14 @@ is overridden.  The blocks shown come from `org-other-agenda-series'."
 (cl-pushnew #'org-other-agenda-embark-targets embark-target-finders)
 (add-to-list 'embark-keymap-alist '(ooa-day org-other-agenda-day-map))
 (add-to-list 'embark-keymap-alist '(ooa-slot org-other-agenda-slot-map))
+(define-key embark-org-heading-map (kbd "C-c C-p")
+            '(menu-item (org-other-agenda--pin-action-label)
+                        org-other-agenda-toggle-pin
+                        :filter org-other-agenda--pin-action-filter))
+(dolist (action '(org-other-agenda-schedule-set-here
+                  org-other-agenda-toggle-pin))
+  (cl-pushnew #'org-other-agenda--with-embark-selected-target
+              (alist-get action embark-around-action-hooks)))
 (cl-pushnew #'org-other-agenda--embark-refresh
             (alist-get :always embark-post-action-hooks))
 
