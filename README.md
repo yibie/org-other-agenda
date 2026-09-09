@@ -53,6 +53,20 @@ Then `M-x org-other-agenda`.
 Your `org-agenda-files` and every other Org setting are used as they are.
 The package overrides nothing.
 
+## Time-block hours
+
+The default range is 08:00–18:00. To include evening events:
+
+```elisp
+(setq org-other-agenda-time-start-hour 7
+      org-other-agenda-time-end-hour 23)
+```
+
+Hours are integers satisfying `0 <= start < end <= 24`; the end is exclusive.
+Settings apply on the next render (press `g` in an open board). They change
+only the displayed time range, not Org timestamps or `org-agenda-time-grid`.
+Time-block row sizes remain unchanged: Today uses 30-minute rows.
+
 ## Tabs
 
 | Tab | Shows |

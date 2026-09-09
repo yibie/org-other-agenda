@@ -2168,4 +2168,150 @@ so this regression needs its own file."
       (when (file-exists-p file)
         (delete-file file)))))
 
+
+(ert-deftest org-other-agenda-test-week-todo-face-survives-button-overlay ()
+  "Week buttons preserve source-local TODO faces in the rendered buffer."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view))
+          (count 0))
+      (org-other-agenda-test--select-tab view 'week)
+      (with-current-buffer view
+        (goto-char (point-min))
+        (while (search-forward "TODO" nil t)
+          (let* ((pos (- (point) 4))
+                 (face (get-char-property pos 'face)))
+            (should (memq 'org-todo (if (listp face) face (list face))))
+            (should (widget-at pos))
+            (setq count (1+ count))))
+        (should (> count 0))))))
+
+(ert-deftest org-other-agenda-test-today-reverse-navigation-keeps-list-order ()
+  "Returning through a long Today list must not jump to fixed time blocks."
+  (let ((file (org-other-agenda-test--make-size-fixture 12)))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-max))
+            (insert "\n** TODO Fixed meeting\n<2026-08-20 Thu 09:00-10:00>\n")
+            (write-region (point-min) (point-max) file nil 'silent))
+          (org-other-agenda-test--with-agenda-file file
+            (dolist (height '(24 40 80))
+              (cl-letf (((symbol-function 'window-body-height)
+                         (lambda (&optional _window) height)))
+                (let ((view (org-other-agenda-test--open-view)))
+                  (org-other-agenda-test--select-tab view 'day)
+                  (with-current-buffer view
+                    (goto-char (org-other-agenda--position-for-place '(day-other 0 0)))
+                    (dotimes (index 11)
+                      (org-other-agenda-next-line)
+                      (org-other-agenda--follow-viewport)
+                      (should (equal (org-other-agenda--place-at-point)
+                                     (list 'day-other 0 (1+ index)))))
+                    (dotimes (index 11)
+                      (org-other-agenda-previous-line)
+                      (org-other-agenda--follow-viewport)
+                      (should (equal (org-other-agenda--place-at-point)
+                                     (list 'day-other 0 (- 10 index)))))
+                    (should (zerop (plist-get textui-state :day-offset)))))))))
+      (delete-file file))))
+
+(ert-deftest org-other-agenda-test-configurable-time-range ()
+  "Today exposes late slots using the configured half-open hour range."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-time-start-hour 20)
+          (org-other-agenda-time-end-hour 24)
+          (view (org-other-agenda-test--open-view)))
+      (org-other-agenda-test--select-tab view 'day)
+      (with-current-buffer view
+        (goto-char (point-min))
+        (let (slots)
+          (while (< (point) (point-max))
+            (let ((object (get-text-property (point) 'org-other-agenda-object)))
+              (when (eq (car-safe object) 'ooa-slot)
+                (push (nth 2 object) slots)))
+            (goto-char (next-single-property-change
+                        (point) 'org-other-agenda-object nil (point-max))))
+          (should slots)
+          (should (= (apply #'min slots) 1200))
+          (should (= (apply #'max slots) 1410)))))))
+
+(ert-deftest org-other-agenda-test-time-range-validation ()
+  "Hour limits reject reversed, empty, noninteger and out-of-day ranges."
+  (dolist (range '((0 24) (8 18) (23 24)))
+    (let ((org-other-agenda-time-start-hour (car range))
+          (org-other-agenda-time-end-hour (cadr range)))
+      (org-other-agenda--validate-time-range)))
+  (dolist (range '((-1 18) (8 25) (18 8) (8 8) (8.5 18) (8 nil)))
+    (let ((org-other-agenda-time-start-hour (car range))
+          (org-other-agenda-time-end-hour (cadr range)))
+      (should-error (org-other-agenda--validate-time-range)
+                    :type 'user-error))))
+
+(ert-deftest org-other-agenda-test-heading-scan-uses-property-boundaries ()
+  "Wide rows keep title preference without querying every character."
+  (with-temp-buffer
+    (insert (make-string 10000 ?x))
+    (let* ((hd (copy-marker (point-min)))
+           (button (make-overlay 4001 7001))
+           (original (symbol-function 'org-other-agenda--object-hd))
+           (calls 0))
+      (put-text-property 1 10001 'org-other-agenda-object (cons 'org-heading hd))
+      (overlay-put button 'button t)
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'org-other-agenda--object-hd)
+                 (lambda (pos)
+                   (setq calls (1+ calls))
+                   (funcall original pos))))
+        (should (= 4001 (org-other-agenda--heading-position-on-line)))
+        (should (< calls 10)))
+      (delete-overlay button)
+      (should (= 1 (org-other-agenda--heading-position-on-line)))
+      (set-marker hd nil))))
+
+(ert-deftest org-other-agenda-test-week-source-local-todo-faces ()
+  "Custom source-buffer keyword faces reach Week without button overrides."
+  (org-other-agenda-test--with-fixture
+    (let ((view (org-other-agenda-test--open-view)))
+      (with-current-buffer (find-buffer-visiting org-other-agenda-test--fixture)
+        (setq-local org-todo-keyword-faces '(("TODO" . success) ("DONE" . warning))))
+      (org-other-agenda-test--select-tab view 'week)
+      (with-current-buffer view
+        (dolist (pair '(("TODO" . success) ("DONE" . warning)))
+          (goto-char (point-min))
+          (should (search-forward (car pair) nil t))
+          (let ((face (get-char-property (- (point) (length (car pair))) 'face)))
+            (should (memq (cdr pair)
+                          (if (listp face) face (list face))))))))))
+
+(ert-deftest org-other-agenda-test-evening-event-enters-configured-timeblock ()
+  "Extending the range reveals an evening event without regenerating Org."
+  (let ((file (org-other-agenda-test--make-size-fixture 0)))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-max))
+            (insert "\n** TODO Evening event\n<2026-08-20 Thu 22:00-23:00>\n")
+            (write-region (point-min) (point-max) file nil 'silent))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((org-other-agenda-time-start-hour 8)
+                  (org-other-agenda-time-end-hour 18)
+                  (view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'day)
+              (should-not (org-other-agenda-test--goto-rendered-entry
+                           view "Evening event"))
+              (let ((org-other-agenda-time-start-hour 20)
+                    (org-other-agenda-time-end-hour 24))
+                (cl-letf (((symbol-function 'org-other-agenda--generate)
+                           (lambda (&rest _args)
+                             (ert-fail "Range changes must not regenerate Org"))))
+                  (textui-refresh view))
+                (should (org-other-agenda-test--goto-rendered-entry
+                         view "Evening event"))
+                (with-current-buffer view
+                  (should (eq (car (org-other-agenda--place-at-point))
+                              'day-timeblock)))))))
+      (delete-file file))))
+
 ;;; org-other-agenda-test.el ends here

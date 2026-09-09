@@ -307,6 +307,7 @@ provides direct actions, and TARGETS lists outer nouns."
   "A clickable agenda entry row.
 
 The entire row responds to mouse clicks and RET."
+  :button-face-get (lambda (_widget) nil)
   :button-prefix ""
   :button-suffix ""
   :format "%[%v%]"
@@ -679,10 +680,29 @@ which is the location contract used by `embark-org-heading-map'."
 
 (defconst org-other-agenda--slot 15
   "The number of minutes represented by one time-block row.")
-(defconst org-other-agenda--h0 8
-  "The first hour rendered in a time block.")
-(defconst org-other-agenda--h1 18
-  "The hour at which a time block ends.")
+(defcustom org-other-agenda-time-start-hour 8
+  "First hour shown in time blocks, inclusive.
+Use an integer from 0 through 23, smaller than the end hour.
+Changes take effect on the next render."
+  :type '(integer :tag "Start hour")
+  :group 'org-other-agenda)
+
+(defcustom org-other-agenda-time-end-hour 18
+  "Last hour boundary in time blocks, exclusive.
+Use an integer from 1 through 24, greater than the start hour.
+Changes take effect on the next render."
+  :type '(integer :tag "End hour")
+  :group 'org-other-agenda)
+
+(defun org-other-agenda--validate-time-range ()
+  "Reject invalid time-block hour settings before rendering."
+  (unless (and (integerp org-other-agenda-time-start-hour)
+               (integerp org-other-agenda-time-end-hour)
+               (<= 0 org-other-agenda-time-start-hour)
+               (< org-other-agenda-time-start-hour org-other-agenda-time-end-hour)
+               (<= org-other-agenda-time-end-hour 24))
+    (user-error "Time-block hours must satisfy 0 <= start < end <= 24")))
+
 (defconst org-other-agenda--circ
   ["①" "②" "③" "④" "⑤" "⑥" "⑦" "⑧" "⑨"])
 
@@ -746,6 +766,7 @@ Return (`LANES' . `OVERFLOW'); entries in a lane never overlap."
   "Render timed entries from `ENTRIES' in `WIDTH' columns.
 
 The blocks have no borders, and empty gaps collapse into one row."
+  (org-other-agenda--validate-time-range)
   (let* ((timed (sort (cl-remove-if-not #'org-other-agenda--slots entries)
                       (lambda (a b)
                         (let ((ra (org-other-agenda--slots a))
@@ -760,8 +781,8 @@ The blocks have no borders, and empty gaps collapse into one row."
          (split (org-other-agenda--assign-lanes timed nlanes))
          (lanes (car split))
          (over (cdr split))
-         (s0 (/ (* 60 org-other-agenda--h0) org-other-agenda--slot))
-         (s1 (/ (* 60 org-other-agenda--h1) org-other-agenda--slot))
+         (s0 (/ (* 60 org-other-agenda-time-start-hour) org-other-agenda--slot))
+         (s1 (/ (* 60 org-other-agenda-time-end-hour) org-other-agenda--slot))
          (empty-run 0)
          out)
     (cl-loop for slot from s0 below s1 do
@@ -924,7 +945,11 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
            ;; while leaving the page half empty.
            (calendar-elements (ooa-day--month-grid sel today busy dead))
            (timeblock-elements
-            (ooa-day--timeblock blocks tbw 8 18 30 sel))
+            (progn
+              (org-other-agenda--validate-time-range)
+              (ooa-day--timeblock blocks tbw
+                                  org-other-agenda-time-start-hour
+                                  org-other-agenda-time-end-hour 30 sel)))
            (fixed-lines (+ 2           ; tab bar and query bar
                            (max (length calendar-elements)
                                 (+ 1 (length timeblock-elements)
@@ -2295,7 +2320,9 @@ Keeping the two variables distinct makes those two lookup roles explicit.")
           (when (get-char-property (point) 'button)
             (unless title
               (setq title (point)))))
-        (forward-char 1))
+        ;; Heading identity and button membership only change at property
+        ;; boundaries; scanning every character repeats the same queries.
+        (goto-char (min end (next-char-property-change (point) end))))
       (or title first))))
 
 (defun org-other-agenda--next-heading-position (direction)
@@ -2325,7 +2352,22 @@ Keeping the two variables distinct makes those two lookup roles explicit.")
 (defun org-other-agenda--move-to-entry (direction)
   "Move to the next or previous rendered entry in `DIRECTION'."
   (setq org-other-agenda--movement-scrolled nil)
-  (let ((position (org-other-agenda--next-heading-position direction)))
+  (let* ((place (org-other-agenda--place-at-point))
+         ;; Fixed time blocks precede the list in the buffer, but hidden
+         ;; earlier list rows precede its current first row in reading order.
+         (previous (and (< direction 0)
+                        (eq (car place) 'day-other)
+                        (> (org-other-agenda--viewport-offset 'day) 0)
+                        (= (nth 2 place)
+                           (org-other-agenda--viewport-offset 'day))
+                        (list 'day-other (nth 1 place) (1- (nth 2 place)))))
+         (position
+          (if previous
+              (progn
+                (org-other-agenda--expose-place previous)
+                (setq org-other-agenda--movement-scrolled t)
+                (org-other-agenda--position-for-place previous))
+            (org-other-agenda--next-heading-position direction))))
     (if position
         (goto-char position)
       (let* ((scope (org-other-agenda--viewport-scope))
