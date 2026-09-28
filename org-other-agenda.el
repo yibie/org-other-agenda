@@ -476,9 +476,20 @@ than one applies, the visual priority is clocking, then blocked, then habit."
                        'face 'org-other-agenda-dim)
       "     ")))
 
+(defun org-other-agenda--display-tags (e)
+  "Return the tags of `E' to display, as Org's agenda would show them.
+Tags matching `org-agenda-hide-tags-regexp' are left out, as they are
+from the agenda's own tag string."
+  (let ((tags (plist-get e :tags)))
+    (if (and org-agenda-hide-tags-regexp tags)
+        (cl-remove-if (lambda (tag)
+                        (string-match-p org-agenda-hide-tags-regexp tag))
+                      tags)
+      tags)))
+
 (defun org-other-agenda--tags-cell (e width)
   "Return the tag cell for `E', truncated to `WIDTH' columns."
-  (let* ((tags (plist-get e :tags))
+  (let* ((tags (org-other-agenda--display-tags e))
          (s (if tags (mapconcat (lambda (tg) (concat "#" tg)) tags " ") "")))
     (propertize (truncate-string-to-width s width 0 ?\s) 'face 'org-other-agenda-tag)))
 
@@ -536,7 +547,7 @@ TextUI aligns the columns.  `SCOPE' disambiguates the row's `:focus-id', and
 `:panel', `:col', `:context' and `:targets'.  The ordinal is the entry's
 position in the complete source list and keeps repeated Org rows focusable."
   (let* ((title (org-other-agenda--clean-title e))
-         (tags (plist-get e :tags))
+         (tags (org-other-agenda--display-tags e))
          (tagstr (if tags (mapconcat (lambda (tg) (concat "#" tg)) tags " ") ""))
          (ordinal (plist-get navigation :ordinal))
          (panel (or (plist-get navigation :panel) scope))
