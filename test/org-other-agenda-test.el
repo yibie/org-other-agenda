@@ -2382,4 +2382,18 @@ so this regression needs its own file."
               (should (memq 'day-other panels))
               (should-not (memq 'day-timeblock panels)))))))))
 
+(ert-deftest org-other-agenda-test-log-rows-have-no-priority-cell ()
+  "Org's sorting priority on log rows is not shown as an [#A] cookie."
+  (org-other-agenda-test--with-fixture
+    (let* ((entries (org-other-agenda-test--log-entries))
+           (closed (org-other-agenda-test--log-row
+                    entries "closed" (calendar-absolute-from-gregorian '(8 19 2026)))))
+      (should (>= (plist-get closed :prio) 2000))
+      (should (equal (org-other-agenda--prio-cell closed) "   "))
+      (should (equal (substring-no-properties
+                      (org-other-agenda--prio-cell
+                       (org-other-agenda-test--entry-by-title
+                        entries "Ship the release notes")))
+                     " A ")))))
+
 ;;; org-other-agenda-test.el ends here

@@ -394,12 +394,18 @@ disambiguates repeated rows from the same block."
 (defvar-local org-other-agenda--current-object-overlays nil
   "Overlays highlighting the complete structural noun at point.")
 
+(defconst org-other-agenda--log-types '("clock" "closed" "state")
+  "Row types that Org's log mode adds to an agenda day.")
+
 (defun org-other-agenda--prio-cell (e)
   "Return the priority cell for `E'.
 
-1000 is the default priority, not a high priority."
+1000 is the default priority, not a high priority.  Log rows carry a
+`priority' of 100000 so that Org sorts them first; that is no priority
+cookie, so their cell stays empty."
   (let ((p (plist-get e :prio)))
-    (cond ((and p (>= p 2000)) (propertize " A " 'face 'org-other-agenda-a))
+    (cond ((member (plist-get e :etype) org-other-agenda--log-types) "   ")
+          ((and p (>= p 2000)) (propertize " A " 'face 'org-other-agenda-a))
           ((and p (<= p 0))    (propertize " C " 'face 'org-other-agenda-dim))
           (t "   "))))
 
@@ -704,9 +710,6 @@ listed here keep their time in lists, and the Today page shows them with
 the day's untimed items instead of on the grid."
   :type '(set (const "clock") (const "closed") (const "state"))
   :group 'org-other-agenda)
-
-(defconst org-other-agenda--log-types '("clock" "closed" "state")
-  "Row types that Org's log mode adds to an agenda day.")
 
 (defun org-other-agenda--grid-time (e)
   "Return the time of day at which E is drawn on the time grid, or nil.
