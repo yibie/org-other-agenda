@@ -243,6 +243,14 @@ height changes: a hard-coded size stops being 2:1 after a theme, DPI, or text
 scale change. In a terminal the problem does not arise; the terminal enforces
 the cell grid itself.
 
+## Log rows on the time grid
+
+With log mode on, clocked time is drawn on the Today grid like any other
+block. Closed and state-change rows mark a single moment, so they are listed
+with the day's untimed items and keep their time there.
+`org-other-agenda-time-block-log-types` (default `("clock")`) chooses which
+log rows go on the grid.
+
 ## Overlapping time blocks
 
 When several tasks overlap, lanes are allocated from the available width, at
