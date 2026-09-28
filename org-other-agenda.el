@@ -42,6 +42,7 @@
 (defconst org-other-agenda--shadow " *org-other-agenda-shadow*")
 (defconst org-other-agenda--query-shadow " *org-other-agenda-query-shadow*")
 (defvar org-other-agenda-series)
+(defvar org-other-agenda-span)
 (defvar-local org-other-agenda--view nil
   "Non-nil in a TextUI buffer rendered by `org-other-agenda'.")
 (defvar-local org-other-agenda--owned-markers nil
@@ -86,17 +87,52 @@ receives the remainder exactly as Org expects it."
     (when (and (stringp query) (string-match-p "\\S-" query))
       (list (if (eq kind 'tags) 'tags 'search) query))))
 
+(defun org-other-agenda--range-block (series)
+  "Return the last agenda block of SERIES, the one that carries the range.
+The board's date range -- `org-other-agenda-span' and the start that date
+navigation chooses -- is applied to this block only.  In a series such as
+\"today, then the next month\" it is the long block that should move."
+  (car (last (cl-remove-if-not
+              (lambda (block) (memq (car-safe block) '(agenda agenda*)))
+              series))))
+
+(defun org-other-agenda--block-with (block settings)
+  "Return a copy of BLOCK with SETTINGS bound after its own settings.
+Org binds a block's settings in order, so the later ones win."
+  (append (list (nth 0 block) (nth 1 block)
+                (append (nth 2 block) settings))
+          (nthcdr 3 block)))
+
+(defun org-other-agenda--date-string (day)
+  "Return absolute DAY as an ISO date string for `org-agenda-start-day'."
+  (pcase-let ((`(,month ,date ,year) (calendar-gregorian-from-absolute day)))
+    (format "%04d-%02d-%02d" year month date)))
+
 (defun org-other-agenda--base-series (&optional start-day)
-  "Return the configured base series, optionally starting at `START-DAY'."
-  (if start-day
-      (mapcar (lambda (block)
-                (if (eq (car block) 'agenda)
-                    (append block
-                            (list `((org-agenda-start-day
-                                     ,start-day))))
-                  block))
-              org-other-agenda-series)
-    org-other-agenda-series))
+  "Return the configured base series, ready to generate.
+
+`START-DAY', when non-nil, starts every agenda block there.  The series'
+last agenda block also carries the board's date range: the span in
+`org-other-agenda-span' and the start that date navigation chose."
+  (let* ((range-block (org-other-agenda--range-block org-other-agenda-series))
+         (range-start (and (boundp 'textui-state)
+                           (plist-get textui-state :range-start))))
+    (mapcar
+     (lambda (block)
+       (if (not (memq (car-safe block) '(agenda agenda*)))
+           block
+         (let ((settings
+                (append
+                 (and start-day `((org-agenda-start-day ,start-day)))
+                 (and (eq block range-block) range-start
+                      `((org-agenda-start-day
+                         ,(org-other-agenda--date-string range-start))))
+                 (and (eq block range-block) org-other-agenda-span
+                      `((org-agenda-span ',org-other-agenda-span))))))
+           (if settings
+               (org-other-agenda--block-with block settings)
+             block))))
+     org-other-agenda-series)))
 
 (defun org-other-agenda--run-series (series buffer-name)
   "Generate `SERIES' in the hidden agenda buffer `BUFFER-NAME'."
@@ -145,6 +181,55 @@ already be current via `with-current-buffer', so
      (org-other-agenda--base-series start-day)
      org-other-agenda--shadow)))
 
+(defun org-other-agenda--coverage (&optional buffer)
+  "Return the days the agenda blocks of hidden agenda BUFFER cover.
+
+The value is a plist.  `:days' lists every day with a date header.
+`:range' is (FIRST . LAST) for the series' last agenda block, which
+carries the board's date range, and `:range-block' is that block.
+`:owned' lists the days that other agenda blocks cover."
+  (with-current-buffer (or buffer org-other-agenda--shadow)
+    (let (headers range-block days owned range-days)
+      (save-excursion
+        (goto-char (point-min))
+        (while (not (eobp))
+          (when (get-text-property (point) 'org-agenda-date-header)
+            (push (cons (get-text-property (point) 'day)
+                        (get-text-property (point) 'org-series-cmd))
+                  headers))
+          (forward-line 1)))
+      ;; HEADERS is in reverse buffer order, so its first element belongs to
+      ;; the last agenda block.
+      (setq range-block (cdr (car headers)))
+      (dolist (header headers)
+        (when (integerp (car header))
+          (push (car header) days)
+          (if (eq (cdr header) range-block)
+              (push (car header) range-days)
+            (push (car header) owned))))
+      (list :days (delete-dups days)
+            :range (and range-days
+                        (cons (apply #'min range-days)
+                              (apply #'max range-days)))
+            :range-block range-block
+            :owned (delete-dups owned)))))
+
+(defun org-other-agenda--drop-shadowed-rows (entries coverage)
+  "Drop from ENTRIES the range block's rows on days another block covers.
+
+Date navigation moves the range block, and can move it over a day that an
+earlier agenda block already shows, typically today.  That block's rows
+win; its settings were chosen for that day.  COVERAGE comes from
+`org-other-agenda--coverage'."
+  (let ((range-block (plist-get coverage :range-block))
+        (owned (plist-get coverage :owned)))
+    (if (not (and range-block owned))
+        entries
+      (cl-remove-if (lambda (e)
+                      (and (eq (plist-get e :block) range-block)
+                           (memq (plist-get e :dayabs) owned)))
+                    entries))))
+
 (defun org-other-agenda--todo-state-at-marker (hd)
   "Return the TODO state at heading marker HD, or nil.
 
@@ -188,6 +273,7 @@ When `BUFFER' is nil, use the ordinary base shadow buffer."
                         :etype (org-get-at-bol 'type)
                         :extra (org-get-at-bol 'extra)
                         :dayabs (org-get-at-bol 'day)
+                        :block (org-get-at-bol 'org-series-cmd)
                         :blocked (org-get-at-bol 'org-todo-blocked)
                         :habit (org-get-at-bol 'org-habit-p)
                         :day day
@@ -201,7 +287,8 @@ When `BUFFER' is nil, use the ordinary base shadow buffer."
                                        (equal hd org-clock-hd-marker)))
                   out)))
         (forward-line 1))
-      (nreverse out))))
+      (org-other-agenda--drop-shadowed-rows
+       (nreverse out) (org-other-agenda--coverage (current-buffer))))))
 
 ;;; ---------------------------------------------------------------- Clickable row widgets
 
@@ -2159,6 +2246,9 @@ Embark action, the selected `org-heading' target supplies it dynamically."
     (define-key map (kbd "\\") #'org-other-agenda-clear-search)
     (define-key map (kbd "[") #'org-other-agenda-previous-day)
     (define-key map (kbd "]") #'org-other-agenda-next-day)
+    (define-key map (kbd "j") #'org-other-agenda-goto-date)
+    (define-key map (kbd ".") #'org-other-agenda-goto-today)
+    (define-key map (kbd "v") #'org-other-agenda-set-span)
     (define-key map (kbd "n") #'org-other-agenda-next-line)
     (define-key map (kbd "p") #'org-other-agenda-previous-line)
     (define-key map (kbd "u") #'org-other-agenda-parent)
@@ -2262,6 +2352,19 @@ The value has the shape of the command list in
 Base blocks and an active query are generated into separate hidden buffers and
 re-laid out together."
   :type 'sexp
+  :group 'org-other-agenda)
+
+(defcustom org-other-agenda-span nil
+  "Days the board's date range covers, or nil for the series' own span.
+
+The value is applied to the series' last agenda block as its
+`org-agenda-span': a number of days, or a name such as `week' or `month'.
+`org-other-agenda-set-span' and a numeric prefix argument to
+`org-other-agenda' set it for the rest of the session."
+  :type '(choice (const :tag "The series' own span" nil)
+                 (integer :tag "Days")
+                 (const day) (const week) (const fortnight)
+                 (const month) (const year))
   :group 'org-other-agenda)
 
 (defcustom org-other-agenda-buffer-name "*Org Other Agenda*"
@@ -3126,6 +3229,7 @@ removed from the set; failures remain marked and are summarized."
          (kind (plist-get textui-state :query-kind)))
     (org-other-agenda--generate)
     (let ((entries (org-other-agenda--entries)))
+      (textui-set-state view :coverage (org-other-agenda--coverage))
       (textui-set-state view :base-entries entries)
       (textui-set-state view :entries entries))
     (when (and (stringp query) (string-match-p "\\S-" query))
@@ -3193,31 +3297,106 @@ removed from the set; failures remain marked and are summarized."
     (textui-set-state view :search-offset 0)
     (textui-set-state view :tags-offset 0)))
 
+(defun org-other-agenda--selected-date ()
+  "Return the absolute day the board has selected."
+  (or (plist-get textui-state :date) (org-today)))
+
+(defun org-other-agenda-goto-date (date)
+  "Select absolute DATE, rebuilding the agenda when no block covers it.
+
+The series' last agenda block moves by whole spans from where it is now
+until it covers DATE, the way `org-agenda-later' pages through an agenda.
+Interactively, read the date with `org-read-date'."
+  (interactive
+   (list (time-to-days (org-read-date nil t nil "Go to date: "))))
+  (let* ((view (current-buffer))
+         (coverage (plist-get textui-state :coverage))
+         (range (plist-get coverage :range)))
+    (when (and range (not (memq date (plist-get coverage :days))))
+      (let* ((span (1+ (- (cdr range) (car range))))
+             (pages (floor (- date (car range)) span)))
+        (textui-set-state view :range-start (+ (car range) (* pages span)))
+        (let ((current-prefix-arg nil))
+          (org-other-agenda-refresh))))
+    (textui-set-state view :date date)))
+
+(defun org-other-agenda-goto-today ()
+  "Select today, restoring the configured date range when it was moved."
+  (interactive)
+  (when (plist-get textui-state :range-start)
+    (textui-set-state (current-buffer) :range-start nil)
+    (let ((current-prefix-arg nil))
+      (org-other-agenda-refresh)))
+  (textui-set-state (current-buffer) :date (org-today)))
+
 (defun org-other-agenda-previous-day ()
   "Move the day view one day back."
   (interactive)
-  (textui-set-state (current-buffer) :date
-                    (lambda (d) (1- (or d (org-today))))))
+  (org-other-agenda-goto-date (1- (org-other-agenda--selected-date))))
 
 (defun org-other-agenda-next-day ()
   "Move the day view one day forward."
   (interactive)
-  (textui-set-state (current-buffer) :date
-                    (lambda (d) (1+ (or d (org-today))))))
+  (org-other-agenda-goto-date (1+ (org-other-agenda--selected-date))))
+
+(defconst org-other-agenda--span-names
+  '(("day" . day) ("week" . week) ("fortnight" . fortnight)
+    ("month" . month) ("year" . year))
+  "Named spans `org-other-agenda-set-span' offers, as `org-agenda-span' has.")
+
+(defun org-other-agenda--read-span ()
+  "Read a span: a name from `org-other-agenda--span-names' or a day count.
+The empty input, or \"default\", returns nil."
+  (let* ((current (or org-other-agenda-span "default"))
+         (answer (completing-read
+                  (format "Days to show (name or number, now %s): " current)
+                  (cons "default" (mapcar #'car org-other-agenda--span-names))
+                  nil nil)))
+    (cond ((member answer '("" "default")) nil)
+          ((assoc answer org-other-agenda--span-names)
+           (cdr (assoc answer org-other-agenda--span-names)))
+          ((string-match-p "\\`[0-9]+\\'" answer)
+           (let ((days (string-to-number answer)))
+             (if (> days 0) days (user-error "A span needs at least one day"))))
+          (t (user-error "Not a span: %s" answer)))))
+
+(defun org-other-agenda-set-span (span)
+  "Show SPAN days in the board's date range and rebuild the agenda.
+
+SPAN is a number of days or a name that `org-agenda-span' accepts; nil
+restores the series' own span.  A numeric prefix argument is the number of
+days; otherwise read it.  The choice is kept in `org-other-agenda-span' for
+the rest of the session."
+  (interactive
+   (list (if (and current-prefix-arg (not (consp current-prefix-arg)))
+             (prefix-numeric-value current-prefix-arg)
+           (org-other-agenda--read-span))))
+  (setq org-other-agenda-span span)
+  (when org-other-agenda--view
+    (let ((current-prefix-arg nil))
+      (org-other-agenda-refresh)))
+  (message "Showing %s" (if span (format "%s days" span) "the default span")))
 
 ;;;###autoload
-(defun org-other-agenda ()
+(defun org-other-agenda (&optional span)
   "Display the Org agenda as a board.
 
 Uses `org-agenda-files' and every other Org setting as they are; nothing
-is overridden.  The blocks shown come from `org-other-agenda-series'."
-  (interactive)
+is overridden.  The blocks shown come from `org-other-agenda-series'.
+A numeric prefix argument SPAN sets `org-other-agenda-span', the number of
+days the date range covers, for the rest of the session."
+  (interactive (list (and current-prefix-arg (not (consp current-prefix-arg))
+                          (prefix-numeric-value current-prefix-arg))))
+  (when span
+    (setq org-other-agenda-span span))
   (org-other-agenda--generate)
   (let ((entries (org-other-agenda--entries)))
     (let ((buffer (textui-open org-other-agenda-buffer-name
                                #'org-other-agenda--frame
                                (list :entries entries
                                      :base-entries entries
+                                     :coverage (org-other-agenda--coverage)
+                                     :range-start nil
                                      :query-entries nil
                                      :query nil
                                      :query-kind 'search

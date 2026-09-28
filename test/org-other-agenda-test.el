@@ -36,6 +36,9 @@
     ("\\" . org-other-agenda-clear-search)
     ("[" . org-other-agenda-previous-day)
     ("]" . org-other-agenda-next-day)
+    ("j" . org-other-agenda-goto-date)
+    ("." . org-other-agenda-goto-today)
+    ("v" . org-other-agenda-set-span)
     ("n" . org-other-agenda-next-line)
     ("p" . org-other-agenda-previous-line)
     ("u" . org-other-agenda-parent)
@@ -2313,5 +2316,175 @@ so this regression needs its own file."
                   (should (eq (car (org-other-agenda--place-at-point))
                               'day-timeblock)))))))
       (delete-file file))))
+
+(defun org-other-agenda-test--day (month day)
+  "Return the absolute day of MONTH/DAY in the fixture's year."
+  (calendar-absolute-from-gregorian (list month day 2026)))
+
+(defun org-other-agenda-test--header-days ()
+  "Return the absolute days of the shadow agenda's date headers, in order."
+  (with-current-buffer org-other-agenda--shadow
+    (let (days)
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when (get-text-property (point) 'org-agenda-date-header)
+          (push (get-text-property (point) 'day) days))
+        (forward-line 1))
+      (nreverse days))))
+
+(defconst org-other-agenda-test--today-and-range-series
+  '((agenda "" ((org-agenda-span 1)))
+    (agenda "" ((org-agenda-start-day "2026-08-21")
+                (org-agenda-span 3))))
+  "A series shaped like \"today, then the next few days\".
+The second block would say \"+1d\" in real use, but Org resolves a relative
+start day from the clock, not from `org-today', so the test pins it.")
+
+(defun org-other-agenda-test--open-board ()
+  "Open the board with `org-other-agenda' itself, returning its buffer."
+  (let ((org-other-agenda-buffer-name org-other-agenda-test--view-buffer))
+    (when-let* ((old (get-buffer org-other-agenda-buffer-name)))
+      (kill-buffer old))
+    (org-other-agenda)))
+
+(ert-deftest org-other-agenda-test-start-day-reaches-blocks-with-settings ()
+  "An explicit start day applies to agenda blocks that have settings."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-series '((agenda "" ((org-agenda-span 3))))))
+      (org-other-agenda--generate "2026-08-17")
+      (should (equal (org-other-agenda-test--header-days)
+                     (mapcar (lambda (d) (org-other-agenda-test--day 8 d))
+                             '(17 18 19)))))))
+
+(ert-deftest org-other-agenda-test-span-applies-to-the-last-agenda-block ()
+  "The span setting resizes the last agenda block and leaves the others."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-series org-other-agenda-test--today-and-range-series)
+          (org-other-agenda-span 5))
+      (org-other-agenda--generate)
+      (should (equal (org-other-agenda-test--header-days)
+                     (mapcar (lambda (d) (org-other-agenda-test--day 8 d))
+                             '(20 21 22 23 24 25))))
+      (let ((coverage (org-other-agenda--coverage)))
+        (should (equal (plist-get coverage :range)
+                       (cons (org-other-agenda-test--day 8 21)
+                             (org-other-agenda-test--day 8 25))))
+        (should (equal (plist-get coverage :owned)
+                       (list (org-other-agenda-test--day 8 20))))))))
+
+(ert-deftest org-other-agenda-test-goto-date-pages-the-range-block ()
+  "A day no block covers moves the last agenda block by whole spans."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-series org-other-agenda-test--today-and-range-series)
+          (org-other-agenda-span nil)
+          (generated 0))
+      (with-current-buffer (org-other-agenda-test--open-board)
+        (let ((count (lambda (&rest _) (setq generated (1+ generated))))
+              (range (lambda ()
+                       (plist-get (plist-get textui-state :coverage) :range))))
+          (advice-add 'org-other-agenda--generate :before count)
+          (unwind-protect
+              (progn
+                (should (equal (funcall range)
+                               (cons (org-other-agenda-test--day 8 21)
+                                     (org-other-agenda-test--day 8 23))))
+                ;; Inside the range: no rebuild.
+                (org-other-agenda-goto-date (org-other-agenda-test--day 8 22))
+                (should (= generated 0))
+                ;; One day past the end: the next page.
+                (org-other-agenda-goto-date (org-other-agenda-test--day 8 24))
+                (should (= generated 1))
+                (should (equal (funcall range)
+                               (cons (org-other-agenda-test--day 8 24)
+                                     (org-other-agenda-test--day 8 26))))
+                (should (= (plist-get textui-state :date)
+                           (org-other-agenda-test--day 8 24)))
+                ;; Today stays covered by the first block: no rebuild.
+                (org-other-agenda-goto-date (org-other-agenda-test--day 8 20))
+                (should (= generated 1))
+                ;; Back past the old range: the previous page.
+                (org-other-agenda-previous-day)
+                (should (= generated 2))
+                (should (equal (funcall range)
+                               (cons (org-other-agenda-test--day 8 18)
+                                     (org-other-agenda-test--day 8 20))))
+                ;; `org-other-agenda-goto-today' restores the configured range.
+                (org-other-agenda-goto-today)
+                (should (= generated 3))
+                (should-not (plist-get textui-state :range-start))
+                (should (equal (funcall range)
+                               (cons (org-other-agenda-test--day 8 21)
+                                     (org-other-agenda-test--day 8 23)))))
+            (advice-remove 'org-other-agenda--generate count)))))))
+
+(ert-deftest org-other-agenda-test-moved-range-never-duplicates-today ()
+  "Moving the range over today keeps today's rows from the first block."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-series org-other-agenda-test--today-and-range-series)
+          (org-other-agenda-span nil)
+          (today (org-other-agenda-test--day 8 20)))
+      (with-current-buffer (org-other-agenda-test--open-board)
+        (let* ((rows (lambda ()
+                       (cl-remove-if-not
+                        (lambda (e) (equal (plist-get e :dayabs) today))
+                        (plist-get textui-state :base-entries))))
+               (before (funcall rows)))
+          (should before)
+          (org-other-agenda-goto-date (org-other-agenda-test--day 8 19))
+          (should (memq today (plist-get (plist-get textui-state :coverage)
+                                         :owned)))
+          (should (equal (plist-get (plist-get textui-state :coverage) :range)
+                         (cons (org-other-agenda-test--day 8 18) today)))
+          (should (equal (mapcar #'org-other-agenda-test--title (funcall rows))
+                         (mapcar #'org-other-agenda-test--title before))))))))
+
+(ert-deftest org-other-agenda-test-span-from-prefix-and-command ()
+  "A numeric prefix and `org-other-agenda-set-span' set and keep the span."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-series '((agenda "" ((org-agenda-span 'week)))))
+          (org-other-agenda-span nil)
+          (org-other-agenda-buffer-name org-other-agenda-test--view-buffer))
+      (cl-flet ((length-of-range ()
+                  (let ((range (plist-get (plist-get textui-state :coverage)
+                                          :range)))
+                    (1+ (- (cdr range) (car range))))))
+        (with-current-buffer (org-other-agenda 10)
+          (should (equal org-other-agenda-span 10))
+          (should (= (length-of-range) 10))
+          (org-other-agenda-set-span 4)
+          (should (equal org-other-agenda-span 4))
+          (should (= (length-of-range) 4))
+          (let ((current-prefix-arg 12))
+            (call-interactively #'org-other-agenda-set-span))
+          (should (= (length-of-range) 12))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) "fortnight")))
+            (call-interactively #'org-other-agenda-set-span))
+          (should (eq org-other-agenda-span 'fortnight))
+          (should (= (length-of-range) 14))
+          (org-other-agenda-set-span nil)
+          (should (= (length-of-range) 7)))
+        ;; Reopening keeps the remembered span.
+        (org-other-agenda-set-span 5)
+        (with-current-buffer (org-other-agenda)
+          (should (= (length-of-range) 5)))))))
+
+(ert-deftest org-other-agenda-test-calendar-click-reaches-uncovered-days ()
+  "Clicking a month-calendar day outside the range rebuilds around it."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-series '((agenda "" ((org-agenda-span 'week)))))
+          (org-other-agenda-span nil)
+          (target (org-other-agenda-test--day 8 31)))
+      (with-current-buffer (org-other-agenda-test--open-board)
+        (org-other-agenda-test--select-tab (current-buffer) 'day)
+        (let ((widget (cl-find-if (lambda (w)
+                                    (and (eq (widget-type w) 'ooa-date-cell)
+                                         (equal (widget-get w :ca-abs) target)))
+                                  textui--widgets)))
+          (should widget)
+          (widget-apply widget :action)
+          (should (= (plist-get textui-state :date) target))
+          (should (memq target (plist-get (plist-get textui-state :coverage)
+                                          :days))))))))
 
 ;;; org-other-agenda-test.el ends here

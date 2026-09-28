@@ -117,12 +117,14 @@ then pads the cell to its declared `:width'."
   :format "%v"
   :value-create (lambda (w) (insert (ooa-text--non-empty (widget-get w :value)))))
 
+(declare-function org-other-agenda-goto-date "org-other-agenda" (date))
+
 (define-widget 'ooa-date-cell 'push-button
   "A single date cell in the calendar."
   :button-prefix "" :button-suffix "" :format "%[%v%]"
   :value-create (lambda (w) (insert (widget-value w)))
   :action (lambda (w &optional _e)
-            (textui-set-state (current-buffer) :date (widget-get w :ca-abs))))
+            (org-other-agenda-goto-date (widget-get w :ca-abs))))
 
 (defun ooa-day--navigation-value (value &rest properties)
   "Return a copy of VALUE carrying renderer-owned navigation PROPERTIES."
