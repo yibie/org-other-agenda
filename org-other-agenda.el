@@ -2729,14 +2729,44 @@ ARGUMENTS are the around-action hook arguments supplied by Embark."
   (let ((org-other-agenda--embark-selected-target target))
     (apply run arguments)))
 
-(defun org-other-agenda--schedule-time (day start)
-  "Return an Org date string for absolute DAY and optional START minutes."
+(defcustom org-other-agenda-schedule-slot-duration nil
+  "How long a task scheduled onto a time slot is booked for.
+
+nil writes the start time alone, <2026-08-20 Thu 14:00>.  `effort' writes a
+range as long as the task's effort, <2026-08-20 Thu 14:00-14:45>; a task
+without an effort, or one whose range would run past midnight, gets the
+start time alone.  Org reads the end of a range as the entry's duration, so
+the Today grid draws the task at that length and tools that look for
+overlapping appointments can see it."
+  :type '(choice (const :tag "Start time only" nil)
+                 (const :tag "Start plus the task's effort" effort))
+  :group 'org-other-agenda)
+
+(defun org-other-agenda--slot-minutes (heading)
+  "Return the minutes to book HEADING for on a time slot, or nil.
+See `org-other-agenda-schedule-slot-duration'."
+  (when (eq org-other-agenda-schedule-slot-duration 'effort)
+    (when-let* ((anchor (org-other-agenda--heading-anchor heading)))
+      (prog1
+          (let ((effort (org-entry-get anchor org-effort-property)))
+            (when (and effort (string-match-p "[0-9]" effort))
+              (let ((minutes (ignore-errors (org-duration-to-minutes effort))))
+                (and minutes (> minutes 0) (round minutes)))))
+        (set-marker anchor nil)))))
+
+(defun org-other-agenda--schedule-time (day start &optional minutes)
+  "Return an Org date string for absolute DAY and optional START minutes.
+With MINUTES as well, return a time range that long, unless it would run
+past midnight."
   (pcase-let ((`(,month ,date ,year)
                (calendar-gregorian-from-absolute day)))
     (format "%04d-%02d-%02d%s" year month date
-            (if start
-                (format " %02d:%02d" (/ start 60) (% start 60))
-              ""))))
+            (cond ((null start) "")
+                  ((and minutes (<= (+ start minutes) (* 24 60)))
+                   (let ((end (+ start minutes)))
+                     (format " %02d:%02d-%02d:%02d"
+                             (/ start 60) (% start 60) (/ end 60) (% end 60))))
+                  (t (format " %02d:%02d" (/ start 60) (% start 60)))))))
 
 (defun org-other-agenda-schedule-set-here (&optional target)
   "Schedule every marked heading on the day or slot at point.
@@ -2771,7 +2801,12 @@ removed from the set; failures remain marked and are summarized."
                 (org-other-agenda--with-shadow-agenda shadow nil
                   (goto-char (car pair))
                   (org-agenda-update-agenda-type)
-                  (org-agenda-schedule nil time))
+                  (org-agenda-schedule
+                   nil
+                   (if start
+                       (org-other-agenda--schedule-time
+                        day start (org-other-agenda--slot-minutes heading))
+                     time)))
                 (push title successes)
                 (setq remaining
                       (org-other-agenda--remove-marked-heading

@@ -2314,4 +2314,75 @@ so this regression needs its own file."
                               'day-timeblock)))))))
       (delete-file file))))
 
+(defun org-other-agenda-test--schedule-onto-slot (setting)
+  "Schedule two fixture tasks onto one Today slot with SETTING.
+Return the scheduled timestamps as (WITH-EFFORT . WITHOUT-EFFORT)."
+  (let ((file (make-temp-file "org-other-agenda-slot-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "#+TODO: TODO | DONE\n\n"
+                    "* TODO Estimated\n:PROPERTIES:\n:EFFORT:   0:45\n:END:\n\n"
+                    "* TODO Unestimated\n"))
+          (org-other-agenda-test--with-agenda-file file
+            (let ((org-other-agenda-schedule-slot-duration setting)
+                  (view (org-other-agenda-test--open-view)))
+              (org-other-agenda-test--select-tab view 'someday)
+              (with-current-buffer view
+                (dolist (title '("Estimated" "Unestimated"))
+                  (should (org-other-agenda-test--goto-rendered-entry
+                           view title))
+                  (setq textui-state
+                        (plist-put
+                         textui-state :marked
+                         (org-other-agenda--add-marked-heading
+                          (org-other-agenda--at-point)
+                          (org-other-agenda--marked-headings)))))
+                (org-other-agenda-test--select-tab view 'day)
+                (goto-char (org-other-agenda--position-for-place
+                            '(day-timeblock 0 4)))
+                (should (string-match-p
+                         "Scheduled 2; failed 0"
+                         (org-other-agenda-schedule-set-here))))
+              (with-current-buffer (find-file-noselect file)
+                (org-with-wide-buffer
+                 (cl-flet ((stamp (title)
+                             (goto-char (point-min))
+                             (re-search-forward (concat "^\\* TODO " title))
+                             (org-entry-get nil "SCHEDULED")))
+                   (cons (stamp "Estimated") (stamp "Unestimated"))))))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
+(ert-deftest org-other-agenda-test-slot-scheduling-can-book-the-effort ()
+  "Scheduling onto a slot writes a range as long as the task's effort."
+  (pcase-let ((`(,estimated . ,unestimated)
+               (org-other-agenda-test--schedule-onto-slot 'effort)))
+    (should (string-match
+             "\\`<2026-08-20 Thu \\([0-9]+\\):\\([0-9]+\\)-\\([0-9]+\\):\\([0-9]+\\)>\\'"
+             estimated))
+    (let ((start (+ (* 60 (string-to-number (match-string 1 estimated)))
+                    (string-to-number (match-string 2 estimated))))
+          (end (+ (* 60 (string-to-number (match-string 3 estimated)))
+                  (string-to-number (match-string 4 estimated)))))
+      (should (= 45 (- end start))))
+    (should (string-match-p "\\`<2026-08-20 Thu [0-9]+:[0-9]+>\\'" unestimated))))
+
+(ert-deftest org-other-agenda-test-slot-scheduling-defaults-to-start-time ()
+  "By default scheduling onto a slot writes the start time alone."
+  (pcase-let ((`(,estimated . ,unestimated)
+               (org-other-agenda-test--schedule-onto-slot nil)))
+    (should (string-match-p "\\`<2026-08-20 Thu [0-9]+:[0-9]+>\\'" estimated))
+    (should (string-match-p "\\`<2026-08-20 Thu [0-9]+:[0-9]+>\\'" unestimated))))
+
+(ert-deftest org-other-agenda-test-slot-range-never-crosses-midnight ()
+  "A booking that would run past midnight falls back to a start time."
+  (let ((day (calendar-absolute-from-gregorian '(8 20 2026))))
+    (should (equal (org-other-agenda--schedule-time day (* 60 23) 45)
+                   "2026-08-20 23:00-23:45"))
+    (should (equal (org-other-agenda--schedule-time day (* 60 23) 90)
+                   "2026-08-20 23:00"))
+    (should (equal (org-other-agenda--schedule-time day nil 90)
+                   "2026-08-20"))))
+
 ;;; org-other-agenda-test.el ends here
