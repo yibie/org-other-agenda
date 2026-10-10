@@ -1,7 +1,7 @@
 # 合成议程夹具
 
 `agenda.org` 是 org-other-agenda 的测试夹具。它不是真实数据，而是为覆盖
-`.specs/org-other-agenda/SPEC.md` 中列出的语义而构造的。
+本包需要处理的各种 agenda 语义而构造的。
 
 ## 固定基准日
 

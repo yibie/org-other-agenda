@@ -2372,4 +2372,86 @@ checkboxes stays visible and dimmed, so it stays on the board, marked."
                           entries "Prepare the launch checklist")
                          :blocked)))))
 
+(defun org-other-agenda-test--log-entries ()
+  "Generate the fixture week with every log row type, returning its entries."
+  (let ((org-other-agenda-series
+         '((agenda "" ((org-agenda-span 'week)
+                       (org-agenda-show-log t)
+                       (org-agenda-log-mode-items '(closed clock state)))))))
+    (org-other-agenda-test--generate)))
+
+(defun org-other-agenda-test--log-row (entries type day)
+  "Return the first row in ENTRIES of log TYPE on absolute DAY."
+  (cl-find-if (lambda (entry)
+                (and (equal (plist-get entry :etype) type)
+                     (equal (plist-get entry :dayabs) day)))
+              entries))
+
+(ert-deftest org-other-agenda-test-log-moments-stay-off-the-time-grid ()
+  "Closed and state rows are untimed items on Today; clock rows are blocks."
+  (org-other-agenda-test--with-fixture
+    (let* ((entries (org-other-agenda-test--log-entries))
+           (day (calendar-absolute-from-gregorian '(8 19 2026)))
+           (closed (org-other-agenda-test--log-row entries "closed" day))
+           (state (org-other-agenda-test--log-row entries "state" day))
+           (clock (org-other-agenda-test--log-row entries "clock" day))
+           (textui-state (list :date day :base-entries entries)))
+      (should (and closed state clock))
+      ;; The rows keep their time for the list views.
+      (should (plist-get closed :time))
+      (should (plist-get state :time))
+      (let ((grid (cdr (assq 'day (org-other-agenda--classify entries))))
+            (other (org-other-agenda--page-entries 'day-other)))
+        (should (memq clock grid))
+        (should-not (memq closed grid))
+        (should-not (memq state grid))
+        (should (memq closed other))
+        (should (memq state other))
+        (should-not (memq clock other)))
+      (let ((org-other-agenda-time-block-log-types '("clock" "closed")))
+        (should (memq closed (cdr (assq 'day (org-other-agenda--classify
+                                                entries)))))))))
+
+(ert-deftest org-other-agenda-test-closed-row-renders-with-untimed-items ()
+  "A closed row inside the grid's hours renders in the untimed panel."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-series
+           '((agenda "" ((org-agenda-span 'week)
+                         (org-agenda-show-log t)
+                         (org-agenda-log-mode-items '(closed))))))
+          (org-other-agenda-time-start-hour 0)
+          (org-other-agenda-time-end-hour 24))
+      (let ((view (org-other-agenda-test--open-view)))
+        (textui-set-state view :date
+                          (calendar-absolute-from-gregorian '(8 19 2026)))
+        (org-other-agenda-test--select-tab view 'day)
+        (with-current-buffer view
+          (let ((closed (org-other-agenda-test--log-row
+                         (plist-get textui-state :entries) "closed"
+                         (calendar-absolute-from-gregorian '(8 19 2026)))))
+            (should closed)
+            (goto-char (point-min))
+            (let (panels)
+              (while (< (point) (point-max))
+                (when (equal (org-other-agenda--object-hd (point))
+                             (plist-get closed :hd))
+                  (cl-pushnew (car (org-other-agenda--place-at-point)) panels))
+                (forward-char 1))
+              (should (memq 'day-other panels))
+              (should-not (memq 'day-timeblock panels)))))))))
+
+(ert-deftest org-other-agenda-test-log-rows-have-no-priority-cell ()
+  "Org's sorting priority on log rows is not shown as an [#A] cookie."
+  (org-other-agenda-test--with-fixture
+    (let* ((entries (org-other-agenda-test--log-entries))
+           (closed (org-other-agenda-test--log-row
+                    entries "closed" (calendar-absolute-from-gregorian '(8 19 2026)))))
+      (should (>= (plist-get closed :prio) 2000))
+      (should (equal (org-other-agenda--prio-cell closed) "   "))
+      (should (equal (substring-no-properties
+                      (org-other-agenda--prio-cell
+                       (org-other-agenda-test--entry-by-title
+                        entries "Ship the release notes")))
+                     " A ")))))
+
 ;;; org-other-agenda-test.el ends here

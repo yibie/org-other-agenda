@@ -400,12 +400,18 @@ disambiguates repeated rows from the same block."
 (defvar-local org-other-agenda--current-object-overlays nil
   "Overlays highlighting the complete structural noun at point.")
 
+(defconst org-other-agenda--log-types '("clock" "closed" "state")
+  "Row types that Org's log mode adds to an agenda day.")
+
 (defun org-other-agenda--prio-cell (e)
   "Return the priority cell for `E'.
 
-1000 is the default priority, not a high priority."
+1000 is the default priority, not a high priority.  Log rows carry a
+`priority' of 100000 so that Org sorts them first; that is no priority
+cookie, so their cell stays empty."
   (let ((p (plist-get e :prio)))
-    (cond ((and p (>= p 2000)) (propertize " A " 'face 'org-other-agenda-a))
+    (cond ((member (plist-get e :etype) org-other-agenda--log-types) "   ")
+          ((and p (>= p 2000)) (propertize " A " 'face 'org-other-agenda-a))
           ((and p (<= p 0))    (propertize " C " 'face 'org-other-agenda-dim))
           (t "   "))))
 
@@ -711,6 +717,27 @@ Changes take effect on the next render."
   :type '(integer :tag "End hour")
   :group 'org-other-agenda)
 
+(defcustom org-other-agenda-time-block-log-types '("clock")
+  "Log-mode row types drawn as blocks on the time grid.
+
+With log mode on, Org lists what happened on each day.  A `clock' row has a
+start and a duration.  A `closed' or `state' row records a single moment,
+and drawing a moment as a block invents a length for it.  Row types not
+listed here keep their time in lists, and the Today page shows them with
+the day's untimed items instead of on the grid."
+  :type '(set (const "clock") (const "closed") (const "state"))
+  :group 'org-other-agenda)
+
+(defun org-other-agenda--grid-time (e)
+  "Return the time of day at which E is drawn on the time grid, or nil.
+See `org-other-agenda-time-block-log-types'."
+  (let ((time (plist-get e :time))
+        (type (plist-get e :etype)))
+    (and time
+         (or (not (member type org-other-agenda--log-types))
+             (member type org-other-agenda-time-block-log-types))
+         time)))
+
 (defun org-other-agenda--validate-time-range ()
   "Reject invalid time-block hour settings before rendering."
   (unless (and (integerp org-other-agenda-time-start-hour)
@@ -725,7 +752,7 @@ Changes take effect on the next render."
 
 (defun org-other-agenda--slots (e)
   "Return the half-open slot range occupied by `E', or nil when it has no time."
-  (let ((tod (plist-get e :time)))
+  (let ((tod (org-other-agenda--grid-time e)))
     (when tod
       (let* ((mins (+ (* 60 (/ tod 100)) (% tod 100)))
              (dur (or (plist-get e :dur) 45))
@@ -889,8 +916,8 @@ below.  `WIDTH' and `TODO-WIDTH' control the layout."
          (agenda (cl-remove-if-not (lambda (e) (eq (plist-get e :type) 'agenda)) all))
          (day-entries (cl-remove-if-not
                        (lambda (e) (equal (plist-get e :dayabs) sel)) agenda))
-         (timed (cl-remove-if-not (lambda (e) (plist-get e :time)) day-entries))
-         (untimed (cl-remove-if (lambda (e) (plist-get e :time)) day-entries))
+         (timed (cl-remove-if-not #'org-other-agenda--grid-time day-entries))
+         (untimed (cl-remove-if #'org-other-agenda--grid-time day-entries))
          blocks)
     (dolist (e agenda)
       (let ((d (plist-get e :dayabs)))
@@ -1337,7 +1364,7 @@ active body timestamp; it is not the complement of the current agenda span."
           (cons 'day (let ((d (or (plist-get textui-state :date) (org-today))))
                        (cl-remove-if-not
                         (lambda (e) (and (eq (plist-get e :type) 'agenda)
-                                         (plist-get e :time)
+                                         (org-other-agenda--grid-time e)
                                          (equal (plist-get e :dayabs) d)))
                         agenda)))
           (cons 'agenda agenda) (cons 'someday someday)
@@ -2494,7 +2521,7 @@ implementation; all tabs now use `org-other-agenda--viewport-scroll'."
        (cdr (assq panel (org-other-agenda--classify query))))
       ('day-other
        (cl-remove-if
-        (lambda (entry) (plist-get entry :time))
+        #'org-other-agenda--grid-time
         (cl-remove-if-not
          (lambda (entry)
            (and (eq (plist-get entry :type) 'agenda)
