@@ -1,21 +1,6 @@
-# ── Project cognition, not software artifacts ──────────────────────
-# This whole section is for maintainers taking over the project, not package
-# users.  These records are written in Chinese and include retrospectives of
-# mistaken judgments; public-facing material in this repository is English.
-.specs/
-.scratch/
+# ── Agent instructions, not software artifacts ─────────────────────
 .claude/
 AGENTS.md
-START.md
-UPGRADE.md
-CONTEXT.md
-docs/spec-agents/
-skills/
-KERNEL.md
-EVIDENCE.md
-STATUS.md
-docs/adr/
-docs/lessons/
 
 # ── Local prototypes ────────────────────────────────────────────────
 prototype/
