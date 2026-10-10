@@ -2633,6 +2633,60 @@ start day from the clock, not from `org-today', so the test pins it.")
                                      (org-other-agenda-test--day 8 23)))))
             (advice-remove 'org-other-agenda--generate count)))))))
 
+(ert-deftest org-other-agenda-test-range-counts-days-without-headers ()
+  "With `org-agenda-show-all-dates' nil an empty day is still covered."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-series org-other-agenda-test--today-and-range-series)
+          (org-other-agenda-span 10)
+          (org-agenda-show-all-dates nil)
+          (generated 0))
+      (with-current-buffer (org-other-agenda-test--open-board)
+        (let ((count (lambda (&rest _) (setq generated (1+ generated))))
+              (range (lambda ()
+                       (plist-get (plist-get textui-state :coverage) :range))))
+          ;; The fixture has nothing on the 24th, so that day has no header.
+          (should-not (memq (org-other-agenda-test--day 8 24)
+                            (org-other-agenda-test--header-days)))
+          (should (equal (funcall range)
+                         (cons (org-other-agenda-test--day 8 21)
+                               (org-other-agenda-test--day 8 30))))
+          (advice-add 'org-other-agenda--generate :before count)
+          (unwind-protect
+              (progn
+                (dotimes (_ 10)
+                  (org-other-agenda-next-day))
+                (should (= (plist-get textui-state :date)
+                           (org-other-agenda-test--day 8 30)))
+                (should (= generated 0))
+                (org-other-agenda-next-day)
+                (should (= generated 1))
+                (should (equal (funcall range)
+                               (cons (org-other-agenda-test--day 8 31)
+                                     (org-other-agenda-test--day 9 9)))))
+            (advice-remove 'org-other-agenda--generate count)))))))
+
+(ert-deftest org-other-agenda-test-coverage-of-blocks-without-rows ()
+  "Agenda blocks that list nothing still cover the days they span."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-series
+           '((agenda "" ((org-agenda-start-day "2026-08-24")
+                         (org-agenda-span 1)))
+             (agenda "" ((org-agenda-start-day "2027-03-01")
+                         (org-agenda-span 3)))
+             (alltodo "")))
+          (org-other-agenda-span nil)
+          (org-agenda-show-all-dates nil))
+      (org-other-agenda--generate)
+      (should-not (org-other-agenda-test--header-days))
+      (let ((coverage (org-other-agenda--coverage)))
+        (should (equal (plist-get coverage :range)
+                       (cons (calendar-absolute-from-gregorian '(3 1 2027))
+                             (calendar-absolute-from-gregorian '(3 3 2027)))))
+        (should (eq (plist-get coverage :range-block)
+                    (nth 1 org-other-agenda-series)))
+        (should (equal (plist-get coverage :owned)
+                       (list (org-other-agenda-test--day 8 24))))))))
+
 (ert-deftest org-other-agenda-test-moved-range-never-duplicates-today ()
   "Moving the range over today keeps today's rows from the first block."
   (org-other-agenda-test--with-fixture

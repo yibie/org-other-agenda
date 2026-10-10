@@ -188,37 +188,89 @@ already be current via `with-current-buffer', so
      (org-other-agenda--base-series start-day)
      org-other-agenda--shadow)))
 
+(defun org-other-agenda--agenda-blocks ()
+  "Return the agenda blocks of the current hidden agenda buffer, in order.
+
+Each element is (BLOCK ARGS HEADER-DAYS).  BLOCK is the series command the
+text came from, ARGS is what Org recorded as the block's `org-last-args',
+and HEADER-DAYS lists the days that have a date header.  A block's text is
+not always one unbroken run of the property, so runs of one block merge."
+  (let ((pos (point-min)) blocks)
+    (while (< pos (point-max))
+      (let ((block (get-text-property pos 'org-series-cmd))
+            (end (or (next-single-property-change pos 'org-series-cmd)
+                     (point-max))))
+        (when (and block (eq (get-text-property pos 'org-agenda-type) 'agenda))
+          (let (days)
+            (save-excursion
+              (goto-char pos)
+              (while (< (point) end)
+                (when (and (get-text-property (point) 'org-agenda-date-header)
+                           (integerp (get-text-property (point) 'day)))
+                  (push (get-text-property (point) 'day) days))
+                (forward-line 1)))
+            (if-let* ((known (assq block blocks)))
+                (setcar (nthcdr 2 known)
+                        (append (nth 2 known) (nreverse days)))
+              (push (list block (get-text-property pos 'org-last-args)
+                          (nreverse days))
+                    blocks))))
+        (setq pos end)))
+    (nreverse blocks)))
+
+(defun org-other-agenda--block-range (args &optional first)
+  "Return (FIRST . LAST), the days an agenda block generated with ARGS spans.
+
+ARGS is the block's `org-last-args': its start day and span as Org resolved
+them.  FIRST, when known, is the day the block really starts on; otherwise
+it is worked out the way `org-agenda-list' does, including the move back to
+`org-agenda-start-on-weekday' for one- and two-week spans."
+  (let* ((start (or (nth 1 args) (org-today)))
+         (span (or (nth 2 args) org-agenda-span))
+         (days (or (org-agenda-span-to-ndays span (or first start)) 1))
+         (first
+          (or first
+              (if (and org-agenda-start-on-weekday (memq days '(7 14)))
+                  (let ((offset (- (calendar-day-of-week
+                                    (calendar-gregorian-from-absolute start))
+                                   org-agenda-start-on-weekday)))
+                    (- start (+ (if (< offset 0) 7 0) offset)))
+                start))))
+    (cons first (+ first days -1))))
+
 (defun org-other-agenda--coverage (&optional buffer)
   "Return the days the agenda blocks of hidden agenda BUFFER cover.
 
-The value is a plist.  `:days' lists every day with a date header.
-`:range' is (FIRST . LAST) for the series' last agenda block, which
-carries the board's date range, and `:range-block' is that block.
-`:owned' lists the days that other agenda blocks cover."
+The value is a plist.  `:days' lists every day a block spans.  `:range' is
+\(FIRST . LAST) for the series' last agenda block, which carries the board's
+date range, and `:range-block' is that block.  `:owned' lists the days that
+other agenda blocks cover.
+
+The days come from the start and span Org recorded for each block, not from
+the date headers: with `org-agenda-show-all-dates' nil a day without
+entries has no header, and it is still a day the block covers."
   (with-current-buffer (or buffer org-other-agenda--shadow)
-    (let (headers range-block days owned range-days)
-      (save-excursion
-        (goto-char (point-min))
-        (while (not (eobp))
-          (when (get-text-property (point) 'org-agenda-date-header)
-            (push (cons (get-text-property (point) 'day)
-                        (get-text-property (point) 'org-series-cmd))
-                  headers))
-          (forward-line 1)))
-      ;; HEADERS is in reverse buffer order, so its first element belongs to
-      ;; the last agenda block.
-      (setq range-block (cdr (car headers)))
-      (dolist (header headers)
-        (when (integerp (car header))
-          (push (car header) days)
-          (if (eq (cdr header) range-block)
-              (push (car header) range-days)
-            (push (car header) owned))))
+    (let* ((blocks (org-other-agenda--agenda-blocks))
+           (last-block (car (last blocks)))
+           range days owned)
+      (dolist (block blocks)
+        (let* ((rangep (eq block last-block))
+               ;; `org-starting-day' is buffer-local to the agenda and set by
+               ;; each agenda block, so it holds the last block's real start.
+               (span (org-other-agenda--block-range
+                      (nth 1 block)
+                      (and rangep (integerp org-starting-day)
+                           org-starting-day)))
+               (covered (delete-dups
+                         (append (number-sequence (car span) (cdr span))
+                                 (copy-sequence (nth 2 block))))))
+          (if rangep
+              (setq range span)
+            (setq owned (append covered owned)))
+          (setq days (append covered days))))
       (list :days (delete-dups days)
-            :range (and range-days
-                        (cons (apply #'min range-days)
-                              (apply #'max range-days)))
-            :range-block range-block
+            :range range
+            :range-block (car last-block)
             :owned (delete-dups owned)))))
 
 (defun org-other-agenda--drop-shadowed-rows (entries coverage)
