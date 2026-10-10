@@ -112,6 +112,9 @@ are all widgets or all lines.
 | Move | `u` | move to the current object's container, then panel title |
 | Move | `TAB` / `S-TAB` | move between focusable widgets |
 | View | `[` `]` | previous / next selected day |
+| View | `j` | go to a date (`org-read-date`) |
+| View | `.` | go to today and restore the configured date range |
+| View | `v` | choose how many days to show (a number, or day / week / fortnight / month / year) |
 | Move | `C-v` `M-v` | scroll a long list |
 | Change the entry occurrence at point | `S-<left>` `S-<right>` | move its native Org timestamp earlier / later |
 | Change the heading at point | `S-<up>` `S-<down>` | raise / lower its native Org priority |
@@ -210,6 +213,24 @@ To show an existing custom command on the board, take both parts from it:
   (setq org-other-agenda-series (nth 2 command)
         org-other-agenda-settings (nth 3 command)))
 ```
+
+## Date range
+
+The board shows the days its agenda blocks cover. The series' last agenda block
+carries the date range: in a series like "today, then the next thirty days" it
+is the thirty-day block.
+
+- `v` asks how many days that block covers: a number, or a span name as in
+  `org-agenda-span`. A numeric prefix argument answers directly, and so does a
+  numeric prefix to `M-x org-other-agenda` (`C-u 45 M-x org-other-agenda`). The
+  choice is kept in `org-other-agenda-span` for the rest of the session.
+- `[`, `]`, `j` and clicks on the month calendar can select a day no block
+  covers. The range block then moves by whole spans until it covers that day,
+  the way `org-agenda-later` pages through an agenda, and Org rebuilds it.
+- `.` returns to today and to the block's configured start.
+
+When the range block moves onto a day that another agenda block already shows,
+typically today, the other block's rows are the ones kept.
 
 ## Performance
 
