@@ -38,7 +38,6 @@
     ("]" . org-other-agenda-next-day)
     ("j" . org-other-agenda-goto-date)
     ("." . org-other-agenda-goto-today)
-    ("v" . org-other-agenda-set-span)
     ("n" . org-other-agenda-next-line)
     ("p" . org-other-agenda-previous-line)
     ("u" . org-other-agenda-parent)
@@ -373,9 +372,15 @@ user's global block selection."
   (should (eq (keymap-lookup org-other-agenda-entry-cell-map "RET")
               #'org-other-agenda-entry-visit))
   (dolist (binding '(("m" . org-other-agenda-mark-day)
-                     ("s" . org-other-agenda-schedule-set-here)))
+                     ("s" . org-other-agenda-schedule-set-here)
+                     ("v" . org-other-agenda-set-span)))
     (should (eq (keymap-lookup org-other-agenda-day-map (car binding))
                 (cdr binding))))
+  ;; Changing the span is an action on a day, not a view-wide verb.
+  (should-not (keymap-lookup org-other-agenda-view-map "v"))
+  (should (memq #'embark--ignore-target
+                (alist-get 'org-other-agenda-set-span
+                           embark-target-injection-hooks)))
   (should (eq (keymap-lookup org-other-agenda-slot-map "s")
               #'org-other-agenda-schedule-set-here))
   (dolist (key '("t" "s" "d" "," ":" "C-n" "C-p" "C-f" "C-b"))

@@ -2435,7 +2435,6 @@ Embark action, the selected `org-heading' target supplies it dynamically."
     (define-key map (kbd "]") #'org-other-agenda-next-day)
     (define-key map (kbd "j") #'org-other-agenda-goto-date)
     (define-key map (kbd ".") #'org-other-agenda-goto-today)
-    (define-key map (kbd "v") #'org-other-agenda-set-span)
     (define-key map (kbd "n") #'org-other-agenda-next-line)
     (define-key map (kbd "p") #'org-other-agenda-previous-line)
     (define-key map (kbd "u") #'org-other-agenda-parent)
@@ -2469,6 +2468,7 @@ Embark action, the selected `org-heading' target supplies it dynamically."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "m") #'org-other-agenda-mark-day)
     (define-key map (kbd "s") #'org-other-agenda-schedule-set-here)
+    (define-key map (kbd "v") #'org-other-agenda-set-span)
     map)
   "Direct and Embark actions for an `ooa-day' noun.")
 
@@ -3722,6 +3722,10 @@ days the date range covers, for the rest of the session."
                   org-other-agenda-toggle-pin))
   (cl-pushnew #'org-other-agenda--with-embark-selected-target
               (alist-get action embark-around-action-hooks)))
+;; The span prompt asks for a day count, not for the day that was acted on.
+(cl-pushnew #'embark--ignore-target
+            (alist-get 'org-other-agenda-set-span
+                       embark-target-injection-hooks))
 (cl-pushnew #'org-other-agenda--embark-refresh
             (alist-get :always embark-post-action-hooks))
 

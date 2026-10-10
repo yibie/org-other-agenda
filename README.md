@@ -114,7 +114,6 @@ are all widgets or all lines.
 | View | `[` `]` | previous / next selected day |
 | View | `j` | go to a date (`org-read-date`) |
 | View | `.` | go to today and restore the configured date range |
-| View | `v` | choose how many days to show (a number, or day / week / fortnight / month / year) |
 | Move | `C-v` `M-v` | scroll a long list |
 | Change the entry occurrence at point | `S-<left>` `S-<right>` | move its native Org timestamp earlier / later |
 | Change the heading at point | `S-<up>` `S-<down>` | raise / lower its native Org priority |
@@ -126,6 +125,7 @@ are all widgets or all lines.
 | Select | `U` | clear all heading marks and the pending rectangle anchor |
 | Act on the marked set | `B` | run native `org-agenda-bulk-action` |
 | Act on the marked set at a day / empty slot | `s` | schedule every marked heading on that date / at that time |
+| Act on a day | `v` | choose how many days to show (a number, or day / week / fortnight / month / year) |
 | View | `1`–`6` | switch tab |
 | View | `/` | search |
 | View | `\` | clear the search |
@@ -220,7 +220,8 @@ The board shows the days its agenda blocks cover. The series' last agenda block
 carries the date range: in a series like "today, then the next thirty days" it
 is the thirty-day block.
 
-- `v` asks how many days that block covers: a number, or a span name as in
+- `v` on a day (a calendar cell or a date header), or `embark-act` there,
+  asks how many days that block covers: a number, or a span name as in
   `org-agenda-span`. A numeric prefix argument answers directly, and so does a
   numeric prefix to `M-x org-other-agenda` (`C-u 45 M-x org-other-agenda`). The
   choice is kept in `org-other-agenda-span` for the rest of the session.
@@ -231,7 +232,6 @@ is the thirty-day block.
 
 When the range block moves onto a day that another agenda block already shows,
 typically today, the other block's rows are the ones kept.
-
 
 ## Extra cells, row faces, habits and sections
 
