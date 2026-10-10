@@ -2336,4 +2336,40 @@ so this regression needs its own file."
             (should (string-match-p "#work" line))
             (should-not (string-match-p "#urgent" line))))))))
 
+(ert-deftest org-other-agenda-test-settings-bind-around-series ()
+  "Command-wide settings reach Org; block names are never bound as variables."
+  (org-other-agenda-test--with-fixture
+    (let ((org-other-agenda-settings
+           '((org-agenda-tag-filter-preset '("-urgent"))))
+          (bound-block-names nil))
+      (let ((record (lambda (&rest _)
+                      (push (list (boundp 'agenda) (boundp 'alltodo))
+                            bound-block-names))))
+        (advice-add 'org-agenda-list :before record)
+        (unwind-protect
+            (let ((titles (org-other-agenda-test--titles
+                           (org-other-agenda-test--generate))))
+              (should-not (member "Ship the release notes" titles))
+              (should (member "Tidy the backlog board" titles))
+              (should bound-block-names)
+              (dolist (flags bound-block-names)
+                (should (equal flags '(nil nil)))))
+          (advice-remove 'org-agenda-list record))))))
+
+(ert-deftest org-other-agenda-test-invisible-blocked-rows-are-not-entries ()
+  "Rows hidden by `org-agenda-dim-blocked-tasks' `invisible' leave the board.
+Org hides only dependency-blocked rows that way; a row blocked by its own
+checkboxes stays visible and dimmed, so it stays on the board, marked."
+  (org-other-agenda-test--with-fixture
+    (let* ((org-other-agenda-settings
+            '((org-agenda-dim-blocked-tasks 'invisible)))
+           (entries (org-other-agenda-test--generate))
+           (titles (org-other-agenda-test--titles entries)))
+      (dolist (title '("Run the migration dry run" "Cut over production"))
+        (should-not (member title titles)))
+      (should (member "Draft the migration plan" titles))
+      (should (plist-get (org-other-agenda-test--entry-by-title
+                          entries "Prepare the launch checklist")
+                         :blocked)))))
+
 ;;; org-other-agenda-test.el ends here

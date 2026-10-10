@@ -42,6 +42,7 @@
 (defconst org-other-agenda--shadow " *org-other-agenda-shadow*")
 (defconst org-other-agenda--query-shadow " *org-other-agenda-query-shadow*")
 (defvar org-other-agenda-series)
+(defvar org-other-agenda-settings)
 (defvar-local org-other-agenda--view nil
   "Non-nil in a TextUI buffer rendered by `org-other-agenda'.")
 (defvar-local org-other-agenda--owned-markers nil
@@ -113,7 +114,7 @@ receives the remainder exactly as Org expects it."
                 (catch 'exit
                   (org-agenda-run-series
                    "org-other-agenda"
-                   (list series org-other-agenda-series))))
+                   (list series org-other-agenda-settings))))
             ;; `org-agenda-mode' clears ordinary buffer-local variables while
             ;; preparing the buffer, so restore ownership after Org returns.
             (setq-local org-other-agenda--owned-markers
@@ -167,7 +168,12 @@ When `BUFFER' is nil, use the ordinary base shadow buffer."
         (when (get-text-property (line-beginning-position) 'org-agenda-date-header)
           (setq day (buffer-substring-no-properties
                      (line-beginning-position) (line-end-position))))
-        (when (org-get-at-bol 'org-marker)
+        ;; A row Org has hidden -- by a tag or category filter preset, or by
+        ;; `org-agenda-dim-blocked-tasks' set to `invisible' -- stays in the
+        ;; buffer with an `invisible' property.  It is not part of the agenda
+        ;; the user asked for, so it is not part of the board either.
+        (when (and (org-get-at-bol 'org-marker)
+                   (not (invisible-p (line-beginning-position))))
           (let* ((org-marker (org-get-at-bol 'org-marker))
                  (txt (or (org-get-at-bol 'txt) ""))
                  (hd  (org-get-at-bol 'org-hd-marker))
@@ -2273,6 +2279,19 @@ The value has the shape of the command list in
 Base blocks and an active query are generated into separate hidden buffers and
 re-laid out together."
   :type 'sexp
+  :group 'org-other-agenda)
+
+(defcustom org-other-agenda-settings nil
+  "Options bound around the whole series.
+
+The value has the shape of the settings list that follows the block list in
+an `org-agenda-custom-commands' entry: each element is (VARIABLE VALUE-FORM),
+and VALUE-FORM is evaluated.  Org binds these around every block and around
+`org-agenda-finalize', so options that act on the finished agenda belong
+here rather than in one block, for example `org-agenda-tag-filter-preset' or
+`org-agenda-dim-blocked-tasks'.  Rows that such options hide are left out of
+the board."
+  :type '(repeat (list variable sexp))
   :group 'org-other-agenda)
 
 (defcustom org-other-agenda-buffer-name "*Org Other Agenda*"

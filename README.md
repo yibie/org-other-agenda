@@ -191,6 +191,26 @@ to the cached agenda without regenerating it.
 
 Any block type Org accepts works here.
 
+Options that a custom command sets for the whole command, after its block
+list, go in `org-other-agenda-settings`.  Org binds them around every block
+and around the final pass over the agenda, which is where tag filter presets
+and hidden blocked tasks take effect.  Rows those options hide stay out of
+the board:
+
+```elisp
+(setq org-other-agenda-settings
+      '((org-agenda-tag-filter-preset '("-someday"))
+        (org-agenda-dim-blocked-tasks 'invisible)))
+```
+
+To show an existing custom command on the board, take both parts from it:
+
+```elisp
+(let ((command (assoc "d" org-agenda-custom-commands)))
+  (setq org-other-agenda-series (nth 2 command)
+        org-other-agenda-settings (nth 3 command)))
+```
+
 ## Performance
 
 Measured on a synthetic 2000-entry file:
