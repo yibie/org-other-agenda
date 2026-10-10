@@ -2314,4 +2314,26 @@ so this regression needs its own file."
                               'day-timeblock)))))))
       (delete-file file))))
 
+(ert-deftest org-other-agenda-test-hidden-tags-stay-hidden ()
+  "Tags matching `org-agenda-hide-tags-regexp' are not shown on rows."
+  (org-other-agenda-test--with-fixture
+    (cl-letf (((symbol-function 'window-body-height)
+               (lambda (&optional _window) 80)))
+      (let ((org-agenda-hide-tags-regexp (rx bos "urgent" eos))
+            (view (org-other-agenda-test--open-view)))
+        (org-other-agenda-test--select-tab view 'agenda)
+        (with-current-buffer view
+          (let ((entry (org-other-agenda-test--entry-by-title
+                        (plist-get textui-state :entries) "Ship the release notes")))
+            ;; The row keeps the tag for anything that asks for it ...
+            (should (member "urgent" (plist-get entry :tags)))
+            (should (equal (org-other-agenda--display-tags entry) '("work"))))
+          ;; ... but does not show it.
+          (should (org-other-agenda-test--goto-rendered-entry
+                   view "Ship the release notes"))
+          (let ((line (buffer-substring (line-beginning-position)
+                                        (line-end-position))))
+            (should (string-match-p "#work" line))
+            (should-not (string-match-p "#urgent" line))))))))
+
 ;;; org-other-agenda-test.el ends here
