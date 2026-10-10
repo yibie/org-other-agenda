@@ -271,6 +271,15 @@ with the day's untimed items and keep their time there.
 `org-other-agenda-time-block-log-types` (default `("clock")`) chooses which
 log rows go on the grid.
 
+## Scheduling onto a time slot
+
+Marked tasks scheduled onto a slot of the Today grid get the slot's start time
+alone by default. Set `org-other-agenda-schedule-slot-duration` to `effort` to
+book each task for its effort instead, as a range such as
+`<2026-08-20 Thu 14:00-14:45>`. Org then knows how long the task takes: the
+grid draws it at that length, and conflict checkers that compare time ranges
+can see it.
+
 ## Overlapping time blocks
 
 When several tasks overlap, lanes are allocated from the available width, at
