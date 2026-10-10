@@ -44,6 +44,12 @@
 (defvar org-other-agenda-series)
 (defvar org-other-agenda-settings)
 (defvar org-other-agenda-span)
+(defvar org-other-agenda-extra-columns)
+(defvar org-other-agenda-row-face-function)
+(defvar org-other-agenda-habit-graph)
+(defvar org-other-agenda-someday-sections)
+(defvar org-other-agenda--habit-column nil
+  "Width of the habit-graph column while a page is rendered, or nil.")
 (defvar-local org-other-agenda--view nil
   "Non-nil in a TextUI buffer rendered by `org-other-agenda'.")
 (defvar-local org-other-agenda--owned-markers nil
@@ -242,12 +248,52 @@ The source heading remains authoritative, so use it as the generic fallback."
         (goto-char hd)
         (org-get-todo-state)))))
 
+(defun org-other-agenda--at-source (hd function)
+  "Call FUNCTION with no arguments and point on the heading at HD.
+Return its value, or nil when HD is dead.  An error is reported and
+treated as nil, so one broken cell function cannot stop the board."
+  (when (and function (markerp hd) (buffer-live-p (marker-buffer hd)))
+    (condition-case err
+        (org-with-point-at hd
+          (org-back-to-heading t)
+          (funcall function))
+      (error
+       (message "org-other-agenda: %S failed: %s"
+                function (error-message-string err))
+       nil))))
+
+(defun org-other-agenda--source-extras (hd)
+  "Return (COLUMNS ROW-FACE) computed at the heading HD.
+See `org-other-agenda-extra-columns' and
+`org-other-agenda-row-face-function'."
+  (list (mapcar (lambda (column)
+                  (let ((value (org-other-agenda--at-source hd (car column))))
+                    (if (stringp value) value "")))
+                org-other-agenda-extra-columns)
+        (org-other-agenda--at-source hd org-other-agenda-row-face-function)))
+
+(defun org-other-agenda--habit-graph (habit)
+  "Return org-habit's consistency graph for parsed HABIT, as Org draws it."
+  (let ((moment (time-subtract nil (* 3600 org-extend-today-until))))
+    (org-habit-build-graph
+     habit
+     (time-subtract moment (days-to-time org-habit-preceding-days))
+     moment
+     (time-add moment (days-to-time org-habit-following-days)))))
+
+(defun org-other-agenda--habit-graph-width ()
+  "Return the width of a habit consistency graph."
+  (+ 1 org-habit-preceding-days org-habit-following-days))
+
 (defun org-other-agenda--entries (&optional buffer)
   "Extract entry semantics from hidden agenda `BUFFER'.
 
 When `BUFFER' is nil, use the ordinary base shadow buffer."
   (with-current-buffer (or buffer org-other-agenda--shadow)
-    (let (out (day nil))
+    (let (out (day nil)
+              ;; Extra cells depend on the heading alone, and a repeated
+              ;; heading appears on many days; compute them once each.
+              (extras (make-hash-table :test #'equal)))
       (goto-char (point-min))
       (while (not (eobp))
         (when (get-text-property (line-beginning-position) 'org-agenda-date-header)
@@ -280,6 +326,19 @@ When `BUFFER' is nil, use the ordinary base shadow buffer."
                         :extra (org-get-at-bol 'extra)
                         :dayabs (org-get-at-bol 'day)
                         :block (org-get-at-bol 'org-series-cmd)
+                        :extras (and (or org-other-agenda-extra-columns
+                                         org-other-agenda-row-face-function)
+                                     (markerp hd) (marker-buffer hd)
+                                     (let ((key (cons (marker-buffer hd)
+                                                      (marker-position hd))))
+                                       (or (gethash key extras)
+                                           (puthash key
+                                                    (org-other-agenda--source-extras hd)
+                                                    extras))))
+                        :habit-graph (and org-other-agenda-habit-graph
+                                          (org-get-at-bol 'org-habit-p)
+                                          (org-other-agenda--habit-graph
+                                           (org-get-at-bol 'org-habit-p)))
                         :blocked (org-get-at-bol 'org-todo-blocked)
                         :habit (org-get-at-bol 'org-habit-p)
                         :day day
@@ -621,13 +680,24 @@ their cell counts.  Keep this implementation for regression comparisons."
             (truncate-string-to-width title title-width 0 ?\s)
             (org-other-agenda--tags-cell e tag-width))))
 
+(defun org-other-agenda--row-faced (value entry)
+  "Return VALUE with ENTRY's row face, if any, added beneath its own faces.
+See `org-other-agenda-row-face-function'."
+  (let ((face (nth 1 (plist-get entry :extras))))
+    (if (not face)
+        value
+      (let ((value (copy-sequence value)))
+        (add-face-text-property 0 (length value) face t value)
+        value))))
+
 (defun org-other-agenda--cell (value width &optional face row)
   "Build a fixed-width cell from `VALUE'.
 
 `WIDTH' sets the cell width and optional `FACE' supplies its face.  ROW is a
 property list containing the shared entry, place, context and outer targets."
-  (let ((value (if face (propertize value 'face face) value))
-        (entry (plist-get row :entry)))
+  (let* ((entry (plist-get row :entry))
+         (value (org-other-agenda--row-faced
+                 (if face (propertize value 'face face) value) entry)))
     (list :type 'ooa-text
           :value (if entry
                      (org-other-agenda--entry-value
@@ -658,29 +728,47 @@ position in the complete source list and keeps repeated Org rows focusable."
                     :targets (plist-get navigation :targets))))
     (list :type :flex :direction :row :gap 1
           :children
-          (list
-           (org-other-agenda--cell (org-other-agenda--prio-cell e) 3
-                                   nil row)
-           (org-other-agenda--cell (org-other-agenda--state-cell e todo-width)
-                                   todo-width nil row)
-           (org-other-agenda--cell (org-other-agenda--condition-cell e) 1
-                                   nil row)
-           (org-other-agenda--cell (org-other-agenda--time-cell e) 5
-                                   nil row)
-           (list :type 'org-other-agenda-row
-                 :value (org-other-agenda--entry-value
-                         (if (plist-get e :blocked)
-                             (propertize title 'face 'org-other-agenda-blocked)
-                           title)
-                         e place context org-other-agenda-entry-map
-                         (plist-get navigation :targets))
-                 :cool-hd (plist-get e :hd)
-                 :layout (list :grow 1
-                               :focus-id (list scope (plist-get e :hd)
-                                               (plist-get e :day)
-                                               (or ordinal 0))))
-           (org-other-agenda--cell tagstr 18 'org-other-agenda-tag
-                                   row)))))
+          (append
+           (list
+            (org-other-agenda--cell (org-other-agenda--prio-cell e) 3
+                                    nil row)
+            (org-other-agenda--cell (org-other-agenda--state-cell e todo-width)
+                                    todo-width nil row)
+            (org-other-agenda--cell (org-other-agenda--condition-cell e) 1
+                                    nil row)
+            (org-other-agenda--cell (org-other-agenda--time-cell e) 5
+                                    nil row))
+           (cl-loop for column in org-other-agenda-extra-columns
+                    for value in (or (car (plist-get e :extras))
+                                     (make-list
+                                      (length org-other-agenda-extra-columns) ""))
+                    collect (org-other-agenda--cell
+                             (truncate-string-to-width
+                              value (nth 1 column) 0 ?\s)
+                             (nth 1 column) (nth 2 column) row))
+           (list
+            (list :type 'org-other-agenda-row
+                  :value (org-other-agenda--entry-value
+                          (org-other-agenda--row-faced
+                           (if (plist-get e :blocked)
+                               (propertize title 'face 'org-other-agenda-blocked)
+                             title)
+                           e)
+                          e place context org-other-agenda-entry-map
+                          (plist-get navigation :targets))
+                  :cool-hd (plist-get e :hd)
+                  :layout (list :grow 1
+                                :focus-id (list scope (plist-get e :hd)
+                                                (plist-get e :day)
+                                                (or ordinal 0)))))
+           (when org-other-agenda--habit-column
+             (list (org-other-agenda--cell
+                    (or (plist-get e :habit-graph)
+                        (make-string org-other-agenda--habit-column ?\s))
+                    org-other-agenda--habit-column nil row)))
+           (list
+            (org-other-agenda--cell tagstr 18 'org-other-agenda-tag
+                                    row))))))
 
 (defun org-other-agenda--embark-object-at-point ()
   "Return the rendered Org-heading object at point or on the current line."
@@ -1732,19 +1820,68 @@ width."
                        (org-other-agenda--agenda-container-row
                         items ordinal))))))))))
 
+(defun org-other-agenda--block-label (block)
+  "Return the heading that rows from series BLOCK are grouped under.
+That is the block's `org-agenda-overriding-header' when it sets one, or
+its type and match."
+  (let* ((binding (assq 'org-agenda-overriding-header (nth 2 block)))
+         (header (and binding (ignore-errors (eval (cadr binding) t)))))
+    (string-trim
+     (cond ((and (stringp header) (string-match-p "\\S-" header)) header)
+           ((null block) "Tasks")
+           ((and (stringp (nth 1 block)) (string-match-p "\\S-" (nth 1 block)))
+            (format "%s %s" (car block) (nth 1 block)))
+           (t (format "%s" (car block)))))))
+
+(defun org-other-agenda--someday-items (entries)
+  "Return Someday's display descriptors for ENTRIES.
+With `org-other-agenda-someday-sections', a header descriptor precedes the
+rows of each series block, as date headers do on the Agenda page; the
+headers count as rows for navigation there too."
+  (if (not org-other-agenda-someday-sections)
+      (mapcar (lambda (e) (list :kind 'entry :entry e)) entries)
+    (let (out (current 'none))
+      (dolist (e entries (nreverse out))
+        (let ((block (plist-get e :block)))
+          (unless (equal block current)
+            (setq current block)
+            (push (list :kind 'header
+                        :label (org-other-agenda--block-label block))
+                  out))
+          (push (list :kind 'entry :entry e) out))))))
+
 (defun org-other-agenda--someday-page (entries todo-width)
   "Render the undated-task page from `ENTRIES'.
 
 The page explains how to move an item into the dated agenda.  `TODO-WIDTH'
 sets the shared state-column width."
-  (let ((windowed
-         (org-other-agenda--windowed
-          entries
-          (org-other-agenda--viewport-offset 'someday)
-          'someday 3
-          (lambda (entry ordinal)
-            (org-other-agenda--flex-row
-             entry 'someday todo-width (list :ordinal ordinal))))))
+  (let* ((items (org-other-agenda--someday-items entries))
+         (windowed
+          (org-other-agenda--windowed
+           items
+           (org-other-agenda--viewport-offset 'someday)
+           'someday 3
+           (lambda (item ordinal)
+             (if (eq (plist-get item :kind) 'header)
+                 (list :type 'ooa-text
+                       :value (org-other-agenda--container-value
+                               (propertize
+                                (format "── %s" (plist-get item :label))
+                                'face 'org-other-agenda-day)
+                               (list 'someday 0 ordinal) 'someday
+                               (plist-get item :label)))
+               (let ((container
+                      (and org-other-agenda-someday-sections
+                           (org-other-agenda--agenda-container-row
+                            items ordinal))))
+                 (org-other-agenda--flex-row
+                  (plist-get item :entry) 'someday todo-width
+                  (list :ordinal ordinal
+                        :context
+                        (delq nil
+                              (list (and container (list 'someday 0 container))
+                                    (org-other-agenda--panel-place
+                                     'someday)))))))))))
     (list
      (list :type 'ooa-text
            :value (org-other-agenda--panel-value
@@ -1785,6 +1922,12 @@ Combine the tab bar, query bar, and selected page in a vertical layout."
          (todo-width (org-other-agenda--todo-column-width (or all base)))
          (counts (mapcar (lambda (g) (cons (car g) (length (cdr g))))
                         base-groups))
+         (org-other-agenda--habit-column
+          (and org-other-agenda-habit-graph
+               (memq tab '(day agenda someday search tags))
+               (cl-some (lambda (e) (plist-get e :habit-graph))
+                        (if (eq tab 'day) all entries))
+               (org-other-agenda--habit-graph-width)))
          (body (cond
                 ((eq tab 'day) (org-other-agenda--day-page all width todo-width))
                 ((eq tab 'week) (org-other-agenda--week-page all width todo-width))
@@ -2424,6 +2567,51 @@ The value is applied to the series' last agenda block as its
                  (const month) (const year))
   :group 'org-other-agenda)
 
+(defcustom org-other-agenda-extra-columns nil
+  "Extra cells shown after the time in each row of the list views.
+
+Each element is (FUNCTION WIDTH) or (FUNCTION WIDTH FACE).  FUNCTION is
+called with no arguments and point on the entry's heading in its Org
+buffer, like a %(...) expression in `org-agenda-prefix-format', so the same
+functions serve both.  It returns a string, or nil for an empty cell,
+which is cut or padded to WIDTH columns.  Values are computed once per
+heading each time the agenda is generated.  For example, to show the
+effort estimate:
+
+  (setq org-other-agenda-extra-columns
+        \='(((lambda () (org-entry-get nil \"EFFORT\")) 5)))"
+  :type '(repeat (list function
+                       (integer :tag "Width")
+                       (choice :tag "Face" (const nil) face)))
+  :group 'org-other-agenda)
+
+(defcustom org-other-agenda-row-face-function nil
+  "Function returning a face for a whole row in the list views, or nil.
+
+It is called like the functions in `org-other-agenda-extra-columns', with
+point on the entry's heading, and returns a face or nil.  The face is added
+beneath the cells' own faces, so a background color shows through them."
+  :type '(choice (const :tag "None" nil) function)
+  :group 'org-other-agenda)
+
+(defcustom org-other-agenda-habit-graph nil
+  "Non-nil means habit rows show org-habit's consistency graph.
+
+The graph is the one Org draws in the agenda, `org-habit-preceding-days'
+before today to `org-habit-following-days' after it.  It gets its own
+column in the list views whenever a page lists a habit."
+  :type 'boolean
+  :group 'org-other-agenda)
+
+(defcustom org-other-agenda-someday-sections nil
+  "Non-nil means Someday groups its rows by the block they came from.
+
+Each group is headed by the block's `org-agenda-overriding-header', or by
+its type and match when it sets none.  A series with separate todo blocks,
+say one for tasks in progress and one for the rest, keeps them apart."
+  :type 'boolean
+  :group 'org-other-agenda)
+
 (defcustom org-other-agenda-buffer-name "*Org Other Agenda*"
   "Name of the buffer that displays the view."
   :type 'string
@@ -2666,7 +2854,14 @@ implementation; all tabs now use `org-other-agenda--viewport-scroll'."
               when (eq (plist-get item :kind) 'entry)
               collect (cons (list 'agenda 0 row)
                             (plist-get (plist-get item :entry) :hd))))
-    ((or 'someday 'search 'tags 'day-other)
+    ('someday
+     (cl-loop for item in (org-other-agenda--someday-items
+                           (org-other-agenda--page-entries 'someday))
+              for row from 0
+              when (eq (plist-get item :kind) 'entry)
+              collect (cons (list 'someday 0 row)
+                            (plist-get (plist-get item :entry) :hd))))
+    ((or 'search 'tags 'day-other)
      (cl-loop for entry in (org-other-agenda--page-entries panel)
               for row from 0
               collect (cons (list panel 0 row) (plist-get entry :hd))))
@@ -2999,7 +3194,10 @@ removed from the set; failures remain marked and are summarized."
     ('agenda
      (length (org-other-agenda--agenda-items
               (org-other-agenda--page-entries 'agenda))))
-    ((or 'someday 'search 'tags 'day-other 'week-days)
+    ('someday
+     (length (org-other-agenda--someday-items
+              (org-other-agenda--page-entries 'someday))))
+    ((or 'search 'tags 'day-other 'week-days)
      (length (org-other-agenda--page-entries panel col)))
     ('day-overflow (length (plist-get textui-state :day-overflow)))
     (_

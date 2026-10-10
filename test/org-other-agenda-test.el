@@ -2698,4 +2698,133 @@ start day from the clock, not from `org-today', so the test pins it.")
           (should (memq target (plist-get (plist-get textui-state :coverage)
                                           :days))))))))
 
+(defmacro org-other-agenda-test--tall (&rest body)
+  "Run BODY with an 80-line window, so one viewport page shows every row."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'window-body-height)
+              (lambda (&optional _window) 80)))
+     ,@body))
+
+(defun org-other-agenda-test--rendered-line (view title)
+  "Return the text of VIEW's first rendered line showing TITLE's entry."
+  (with-current-buffer view
+    (when (org-other-agenda-test--goto-rendered-entry view title)
+      (buffer-substring (line-beginning-position) (line-end-position)))))
+
+(defun org-other-agenda-test--faces-at (string position)
+  "Return the faces of STRING at POSITION as a list."
+  (let ((face (get-text-property position 'face string)))
+    (if (listp face) face (list face))))
+
+(ert-deftest org-other-agenda-test-extra-columns-render-source-values ()
+  "Extra column functions run at the heading and render before the title."
+  (org-other-agenda-test--tall (org-other-agenda-test--with-fixture
+                                 (let* ((calls 0)
+                                        (org-other-agenda-extra-columns
+                                         `((,(lambda ()
+                                               (setq calls (1+ calls))
+                                               (org-entry-get nil "EFFORT"))
+                                            5)
+                                           (,(lambda () (error "Broken cell")) 3)))
+                                        (view (org-other-agenda-test--open-view)))
+                                   (org-other-agenda-test--select-tab view 'agenda)
+                                   (let ((line (org-other-agenda-test--rendered-line
+                                                view "Ship the release notes")))
+                                     (should line)
+                                     (should (string-match-p "1:30 +Ship the release notes" line)))
+                                   ;; Once per heading, not once per row: headings repeat across days.
+                                   (with-current-buffer view
+                                     (let ((headings (cl-remove-duplicates
+                                                      (mapcar (lambda (e) (plist-get e :hd))
+                                                              (plist-get textui-state :entries))
+                                                      :test #'equal)))
+                                       (should (<= calls (length headings)))))))))
+
+(ert-deftest org-other-agenda-test-row-face-reaches-every-cell ()
+  "The row face function's face is added beneath each cell's own face."
+  (org-other-agenda-test--tall (org-other-agenda-test--with-fixture
+                                 (let* ((org-other-agenda-row-face-function
+                                         (lambda () (and (member "urgent" (org-get-tags)) 'highlight)))
+                                        (view (org-other-agenda-test--open-view)))
+                                   (org-other-agenda-test--select-tab view 'agenda)
+                                   (let ((urgent (org-other-agenda-test--rendered-line
+                                                  view "Ship the release notes"))
+                                         (plain (org-other-agenda-test--rendered-line
+                                                 view "Tidy the backlog board")))
+                                     (should (memq 'highlight
+                                                   (org-other-agenda-test--faces-at
+                                                    urgent (string-match "Ship" urgent))))
+                                     (should (memq 'highlight
+                                                   (org-other-agenda-test--faces-at
+                                                    urgent (string-match "#work" urgent))))
+                                     (should-not (memq 'highlight
+                                                       (org-other-agenda-test--faces-at
+                                                        plain (string-match "Tidy" plain)))))))))
+
+(ert-deftest org-other-agenda-test-habit-rows-show-the-consistency-graph ()
+  "Habit rows carry org-habit's graph; other rows get a blank cell."
+  (org-other-agenda-test--tall (org-other-agenda-test--with-fixture
+                                 (let* ((org-other-agenda-habit-graph t)
+                                        (width (+ 1 org-habit-preceding-days org-habit-following-days))
+                                        (view (org-other-agenda-test--open-view)))
+                                   (with-current-buffer view
+                                     (let ((habit (org-other-agenda-test--entry-by-title
+                                                   (plist-get textui-state :entries) "Daily review")))
+                                       (should (= width (length (plist-get habit :habit-graph))))))
+                                   (org-other-agenda-test--select-tab view 'agenda)
+                                   (let* ((line (org-other-agenda-test--rendered-line view "Daily review"))
+                                          (faces (cl-loop for i from 0 below (length line)
+                                                          append (org-other-agenda-test--faces-at line i))))
+                                     (should (cl-some (lambda (face)
+                                                        (and (symbolp face)
+                                                             (string-prefix-p "org-habit-" (symbol-name face))))
+                                                      faces)))
+                                   ;; Without the option there is no graph and no column.
+                                   (let ((org-other-agenda-habit-graph nil))
+                                     (with-current-buffer view (org-other-agenda-refresh))
+                                     (org-other-agenda-test--select-tab view 'agenda)
+                                     (let ((line (org-other-agenda-test--rendered-line view "Daily review")))
+                                       (should-not (cl-some (lambda (face)
+                                                              (and (symbolp face)
+                                                                   (string-prefix-p "org-habit-"
+                                                                                    (symbol-name face))))
+                                                            (cl-loop for i from 0 below (length line)
+                                                                     append (org-other-agenda-test--faces-at
+                                                                             line i))))))))))
+
+(ert-deftest org-other-agenda-test-someday-sections-follow-the-blocks ()
+  "Someday groups rows under each todo block's header, navigably."
+  (org-other-agenda-test--tall (org-other-agenda-test--with-fixture
+                                 (let* ((org-other-agenda-series
+                                         '((todo "STARTED" ((org-agenda-overriding-header "\nIn progress\n")))
+                                           (todo "TODO" ((org-agenda-overriding-header "Backlog")))))
+                                        (org-other-agenda-someday-sections t)
+                                        (view (org-other-agenda-test--open-view)))
+                                   (org-other-agenda-test--select-tab view 'someday)
+                                   (with-current-buffer view
+                                     (let ((text (buffer-string)))
+                                       (should (string-match "── In progress" text))
+                                       (let ((progress (match-beginning 0)))
+                                         (should (string-match "── Backlog" text))
+                                         (let ((backlog (match-beginning 0)))
+                                           (should (< progress (string-match "Sketch the onboarding flow" text)
+                                                      backlog))
+                                           (should (< backlog (string-match "Read the RFC" text))))))
+                                     ;; Headers are rows, and every entry row maps to its own heading.
+                                     (let ((pairs (org-other-agenda--rectangle-heading-places 'someday)))
+                                       (should (= (org-other-agenda--panel-row-count 'someday 0)
+                                                  (+ 2 (length pairs))))
+                                       (dolist (pair pairs)
+                                         (let ((position (org-other-agenda--position-for-place (car pair))))
+                                           (should position)
+                                           (should (equal (org-other-agenda--object-hd position)
+                                                          (cdr pair))))))
+                                     ;; `u' from an entry reaches its section header.
+                                     (should (org-other-agenda-test--goto-rendered-entry view "Read the RFC"))
+                                     (org-other-agenda-parent)
+                                     (should (string-prefix-p
+                                              "── Backlog"
+                                              (string-trim-left
+                                               (buffer-substring (point) (line-end-position))))))))))
+
 ;;; org-other-agenda-test.el ends here

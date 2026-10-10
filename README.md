@@ -232,6 +232,30 @@ is the thirty-day block.
 When the range block moves onto a day that another agenda block already shows,
 typically today, the other block's rows are the ones kept.
 
+
+## Extra cells, row faces, habits and sections
+
+The list views (Agenda, Someday, Search, Tags and Today's untimed items) can
+show more of each entry:
+
+- `org-other-agenda-extra-columns` adds cells after the time. Each element is
+  `(FUNCTION WIDTH [FACE])`; FUNCTION runs with point on the heading, like a
+  `%(...)` expression in `org-agenda-prefix-format`, so existing prefix
+  functions can be reused.
+- `org-other-agenda-row-face-function` returns a face for the whole row, added
+  beneath the cells' own faces, for example a background for stale tasks.
+- `org-other-agenda-habit-graph` shows org-habit's consistency graph on habit
+  rows.
+- `org-other-agenda-someday-sections` groups Someday by the todo block each row
+  came from, under that block's `org-agenda-overriding-header`.
+
+```elisp
+(setq org-other-agenda-extra-columns
+      '(((lambda () (org-entry-get nil "EFFORT")) 5))
+      org-other-agenda-habit-graph t
+      org-other-agenda-someday-sections t)
+```
+
 ## Performance
 
 Measured on a synthetic 2000-entry file:
